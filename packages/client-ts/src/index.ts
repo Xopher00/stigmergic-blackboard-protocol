@@ -216,12 +216,19 @@ export interface InscribeOptions {
   tags?: string[];
 }
 
+export interface TagFilter {
+  any?: string[];
+  all?: string[];
+  none?: string[];
+}
+
 export interface SniffOptions {
   trails?: string[];
   types?: string[];
   minIntensity?: number;
   limit?: number;
   includeEvaporated?: boolean;
+  tags?: TagFilter;
 }
 
 export interface RegisterScentOptions {
@@ -325,6 +332,7 @@ export class SbpClient {
       min_intensity: options.minIntensity ?? 0,
       limit: options.limit ?? 100,
       include_evaporated: options.includeEvaporated ?? false,
+      tags: options.tags,
     });
   }
 
@@ -386,12 +394,14 @@ export class SbpClient {
   async read(options: {
     trails?: string[];
     keys?: string[];
+    tags?: TagFilter;
     prefix?: string;
     limit?: number;
   } = {}): Promise<ReadResult> {
     return this.rpc<ReadResult>("sbp/read", {
       trails: options.trails,
       keys: options.keys,
+      tags: options.tags,
       prefix: options.prefix,
       limit: options.limit ?? 100,
     });

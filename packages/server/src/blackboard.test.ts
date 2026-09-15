@@ -406,4 +406,134 @@ describe("Blackboard", () => {
       expect(result.stats!.total_traces).toBe(1);
     });
   });
+
+  describe("evaluateScents concurrency", () => {
+    // Regression test: dispatch must be fire-and-forget so a slow handler for
+    // one scent can't delay delivery to another (see SPECIFICATION.md §7.1).
+    it("does not let a slow handler for one scent block trigger delivery to another", async () => {
+      const fired: string[] = [];
+      let releaseSlow: () => void;
+      const slowGate = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+
+      const condition = {
+        type: "threshold" as const,
+        trail: "t",
+        signal_type: "e",
+        aggregation: "max" as const,
+        operator: ">=" as const,
+        value: 0.5,
+      };
+
+      // Registered first so a sequential-await dispatch loop would reach it
+      // before the fast scent.
+      bb.registerScent({
+        scent_id: "slow",
+        agent_endpoint: "http://localhost:8080",
+        condition,
+      });
+      bb.onTrigger("slow", async () => {
+        await slowGate;
+        fired.push("slow");
+      });
+
+      bb.registerScent({
+        scent_id: "fast",
+        agent_endpoint: "http://localhost:8080",
+        condition,
+      });
+      bb.onTrigger("fast", async () => {
+        fired.push("fast");
+      });
+
+      bb.emit({ trail: "t", type: "e", intensity: 0.9 });
+
+      await bb.evaluateScents();
+      // Let scheduled (fire-and-forget) dispatch microtasks/timers get a tick.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(fired).toContain("fast");
+      expect(fired).not.toContain("slow"); // still blocked on the gate
+
+      releaseSlow!();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(fired).toContain("slow");
+    });
+  });
+
+  describe("hysteresis (SPECIFICATION.md §7.4)", () => {
+    const condition = {
+      type: "threshold" as const,
+      trail: "hyst",
+      signal_type: "sig",
+      aggregation: "max" as const,
+      operator: ">=" as const,
+      value: 0.5,
+    };
+
+    function setValue(intensity: number) {
+      bb.evaporate({ trail: "hyst" });
+      bb.emit({ trail: "hyst", type: "sig", intensity, decay: { type: "immortal" }, merge_strategy: "new" });
+    }
+
+    it("hysteresis=0 keeps plain edge_rising semantics unchanged", async () => {
+      const fired: number[] = [];
+      bb.registerScent({
+        scent_id: "s1",
+        agent_endpoint: "http://localhost:8080",
+        condition,
+        trigger_mode: "edge_rising",
+      });
+      bb.onTrigger("s1", async () => {
+        fired.push(1);
+      });
+
+      setValue(0.6);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(1);
+
+      // any dip below threshold and back up re-fires without hysteresis
+      setValue(0.45);
+      await bb.evaluateScents();
+      setValue(0.6);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(2);
+    });
+
+    it("hysteresis > 0 suppresses chatter until the value falls below the re-arm band", async () => {
+      const fired: number[] = [];
+      bb.registerScent({
+        scent_id: "s1",
+        agent_endpoint: "http://localhost:8080",
+        condition,
+        trigger_mode: "edge_rising",
+        hysteresis: 0.1,
+      });
+      bb.onTrigger("s1", async () => {
+        fired.push(1);
+      });
+
+      setValue(0.6);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(1); // first rising edge fires; scent is now disarmed
+
+      // dip to 0.45 -- above threshold-hysteresis (0.4), not enough to re-arm
+      setValue(0.45);
+      await bb.evaluateScents();
+      setValue(0.6);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(1); // still disarmed -- chatter near the threshold must not re-fire
+
+      // fall all the way below the band -- re-arms (met is false here, so no fire yet)
+      setValue(0.3);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(1);
+
+      setValue(0.6);
+      await bb.evaluateScents();
+      expect(fired.length).toBe(2); // re-armed and met again -- should fire
+    });
+  });
 });

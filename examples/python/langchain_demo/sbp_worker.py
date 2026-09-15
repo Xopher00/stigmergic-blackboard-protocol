@@ -95,10 +95,12 @@ class SbpWorker:
         checkpointer: BaseCheckpointSaver | None = None,
         trim_max_tokens: int = 12000,
         middleware: Sequence[AgentMiddleware] = (),
+        recursion_limit: int = 10,
     ) -> None:
         self.agent_id = agent_id
         self.sbp_agent = SbpAgent(agent_id=agent_id, local=local, default_decay=default_decay)
         self._allowed_trails = tuple(allowed_trails) if allowed_trails is not None else None
+        self.active_activations = 0  # in-flight _on_trigger calls, a real busy signal
 
         auto_middleware = [_make_history_trimmer(trim_max_tokens)] if checkpointer else []
         self._llm_agent = create_agent(
@@ -108,7 +110,7 @@ class SbpWorker:
             checkpointer=checkpointer,
             middleware=[*auto_middleware, *middleware],
         )
-        self._invoke_config = {"configurable": {"thread_id": agent_id}, "recursion_limit": 10}
+        self._invoke_config = {"configurable": {"thread_id": agent_id}, "recursion_limit": recursion_limit}
 
         if isinstance(listens_for, dict):
             self.sbp_agent.when(**listens_for)(self._on_trigger)
@@ -119,6 +121,15 @@ class SbpWorker:
         if self._allowed_trails is not None and trail not in self._allowed_trails:
             return f"not permitted: this agent may only use trails {list(self._allowed_trails)}"
         return None
+
+    def _split_trails(self, trails: list[str]) -> tuple[list[str], list[str]]:
+        """Serve what's allowed instead of rejecting the whole call over one bad
+        name — returns (allowed, skipped), never silently drops the useful part."""
+        if self._allowed_trails is None:
+            return trails, []
+        allowed = [t for t in trails if t in self._allowed_trails]
+        skipped = [t for t in trails if t not in self._allowed_trails]
+        return allowed, skipped
 
     def _build_sbp_tools(self, sbp_ops: Sequence[str]) -> list[BaseTool]:
         tools: list[BaseTool] = []
@@ -173,17 +184,17 @@ class SbpWorker:
                     limit: maximum number of signals to return.
                     include_evaporated: include signals that have already decayed away.
                 """
-                for t in trails:
-                    denied = self._denied(t)
-                    if denied:
-                        return denied
+                allowed, skipped = self._split_trails(trails)
+                prefix = f"skipped disallowed trails {skipped}; " if skipped else ""
+                if not allowed:
+                    return prefix + f"no permitted trails requested; this agent may only use {list(self._allowed_trails)}"
                 result = await sbp_agent.sniff(
-                    trails=trails, types=types, min_intensity=min_intensity,
+                    trails=allowed, types=types, min_intensity=min_intensity,
                     limit=limit, include_evaporated=include_evaporated,
                 )
                 if not result.pheromones:
-                    return "no signals found"
-                return "\n".join(
+                    return prefix + "no signals found"
+                return prefix + "\n".join(
                     f"- {p.trail}/{p.type} @ {p.current_intensity:.2f}: {p.payload}" for p in result.pheromones
                 )
 
@@ -196,6 +207,9 @@ class SbpWorker:
                 trail: str, key: str, value: dict[str, Any], tags: list[str] | None = None,
             ) -> str:
                 """Record durable knowledge on the blackboard (survives until erased).
+                If this trail+key didn't already exist, the result's action is
+                "created" — you were first to write it. If it already existed, action
+                is "updated" — something wrote it before you did.
 
                 Args:
                     trail: namespace to write into, e.g. "decisions".
@@ -207,7 +221,7 @@ class SbpWorker:
                 if denied:
                     return denied
                 result = await sbp_agent.inscribe(trail, key, value, tags=tags)
-                return f"inscribed trace v{result.version} at {trail}/{key}"
+                return f"{result.action} trace v{result.version} at {trail}/{key}"
 
             tools.append(sbp_inscribe)
 
@@ -225,14 +239,14 @@ class SbpWorker:
                     prefix: optional key prefix to filter to.
                     limit: maximum number of traces to return.
                 """
-                for t in trails:
-                    denied = self._denied(t)
-                    if denied:
-                        return denied
-                result = await sbp_agent.read(trails=trails, keys=keys, prefix=prefix, limit=limit)
+                allowed, skipped = self._split_trails(trails)
+                note = f"skipped disallowed trails {skipped}; " if skipped else ""
+                if not allowed:
+                    return note + f"no permitted trails requested; this agent may only use {list(self._allowed_trails)}"
+                result = await sbp_agent.read(trails=allowed, keys=keys, prefix=prefix, limit=limit)
                 if not result.traces:
-                    return "no traces found"
-                return "\n".join(f"- {t.trail}/{t.key} v{t.version}: {t.value}" for t in result.traces)
+                    return note + "no traces found"
+                return note + "\n".join(f"- {t.trail}/{t.key} v{t.version}: {t.value}" for t in result.traces)
 
             tools.append(sbp_read)
 
@@ -349,7 +363,28 @@ class SbpWorker:
     async def _on_trigger(self, trigger: TriggerPayload) -> None:
         findings = [p.payload.get("summary", p.payload) for p in trigger.context_pheromones]
         content = f"Woke up via scent '{trigger.scent_id}'. Blackboard state: " + "; ".join(map(str, findings))
-        await self._llm_agent.ainvoke({"messages": [{"role": "user", "content": content}]}, config=self._invoke_config)
+        print(f"[{self.agent_id}] triggered: {content}")
+        self.active_activations += 1
+        try:
+            # astream (not ainvoke) so each step is logged as it happens -- ainvoke only
+            # returns messages on success, losing everything if recursion_limit is hit.
+            async for chunk in self._llm_agent.astream(
+                {"messages": [{"role": "user", "content": content}]},
+                config=self._invoke_config, stream_mode="updates",
+            ):
+                self._log_step(chunk)
+        finally:
+            self.active_activations -= 1
+
+    def _log_step(self, chunk: dict[str, Any]) -> None:
+        for node_update in chunk.values():
+            for msg in node_update.get("messages", []):
+                for call in getattr(msg, "tool_calls", None) or []:
+                    print(f"[{self.agent_id}] tool_call {call['name']}({call['args']})")
+                if type(msg).__name__ == "ToolMessage":
+                    print(f"[{self.agent_id}] tool_result: {msg.content}")
+                elif type(msg).__name__ == "AIMessage" and msg.content:
+                    print(f"[{self.agent_id}] final: {msg.content}")
 
     async def run(self) -> None:
         await self.sbp_agent.run()

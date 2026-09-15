@@ -39,7 +39,12 @@ import {
   SbpError,
 } from "./types.js";
 import { computeIntensity, isEvaporated, defaultDecay } from "./decay.js";
-import { evaluateCondition, createSnapshot } from "./conditions.js";
+import {
+  evaluateCondition,
+  createSnapshot,
+  shouldRearm,
+  type EvaluationResult,
+} from "./conditions.js";
 import { createHash } from "crypto";
 
 export interface BlackboardOptions {
@@ -73,6 +78,9 @@ export class Blackboard {
   private emissionHistory: Array<{ trail: string; type: string; timestamp: number }> = [];
   private evaluationTimer: ReturnType<typeof setInterval> | null = null;
   private startTime = Date.now();
+  private pendingDispatches: Set<Promise<void>> = new Set();
+  // Scent ids disarmed by hysteresis (§7.4); absence from the set means armed.
+  private disarmedScentIds = new Set<string>();
 
   private options: Omit<Required<BlackboardOptions>, "store" | "traceStore">;
 
@@ -311,6 +319,7 @@ export class Blackboard {
     };
 
     this.scents.set(scent_id, scent);
+    this.disarmedScentIds.delete(scent_id); // re-registration re-arms
 
     // Evaluate current state
     const now = Date.now();
@@ -340,6 +349,7 @@ export class Blackboard {
     if (this.scents.has(scent_id)) {
       this.scents.delete(scent_id);
       this.triggerHandlers.delete(scent_id);
+      this.disarmedScentIds.delete(scent_id);
       return { scent_id, status: "deregistered" };
     }
 
@@ -488,10 +498,16 @@ export class Blackboard {
   /**
    * Stop the background evaluation loop
    */
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.evaluationTimer) {
       clearInterval(this.evaluationTimer);
       this.evaluationTimer = null;
+    }
+
+    // Drain in-flight, fire-and-forget trigger dispatches so they don't
+    // outlive the Blackboard instance (mirrors the Python client's stop()).
+    if (this.pendingDispatches.size > 0) {
+      await Promise.allSettled([...this.pendingDispatches]);
     }
   }
 
@@ -515,28 +531,57 @@ export class Blackboard {
         traces: [...this.traceStore.values()],
       });
 
-      const shouldTrigger = this.shouldTrigger(scent, evalResult.met, now);
+      const hysteresis = scent.hysteresis ?? 0;
+      const edgeMode =
+        scent.trigger_mode === "edge_rising" || scent.trigger_mode === "edge_falling";
+
+      // Hysteresis re-arm (§7.4): a fired scent stays disarmed until the
+      // value moves hysteresis beyond the threshold away from the trigger side.
+      if (
+        hysteresis > 0 &&
+        edgeMode &&
+        this.disarmedScentIds.has(scent.scent_id) &&
+        shouldRearm(scent.condition, evalResult.value, evalResult.met, scent.trigger_mode, hysteresis)
+      ) {
+        this.disarmedScentIds.delete(scent.scent_id);
+      }
+
+      const shouldTrigger = this.shouldTrigger(scent, evalResult);
       scent.last_condition_met = evalResult.met;
 
       if (shouldTrigger) {
         scent.last_triggered_at = now;
-        await this.dispatchTrigger(scent, evalResult, now);
+        if (hysteresis > 0 && edgeMode) {
+          this.disarmedScentIds.add(scent.scent_id);
+        }
+        // Fire-and-forget: a slow/blocked handler for this scent must not
+        // delay trigger delivery to other scents in this loop (SPECIFICATION.md §7.1).
+        const dispatchPromise = this.dispatchTrigger(scent, evalResult, now).finally(() => {
+          this.pendingDispatches.delete(dispatchPromise);
+        });
+        this.pendingDispatches.add(dispatchPromise);
       }
     }
   }
 
   /**
-   * Determine if a scent should trigger based on mode
+   * Determine if a scent should trigger based on mode; with hysteresis > 0, edge modes gate on armed (see evaluateScents) instead of last_condition_met
    */
-  private shouldTrigger(scent: Scent, conditionMet: boolean, _now: number): boolean {
+  private shouldTrigger(scent: Scent, evalResult: EvaluationResult): boolean {
+    const conditionMet = evalResult.met;
+    const hysteresis = scent.hysteresis ?? 0;
+    const armed = !this.disarmedScentIds.has(scent.scent_id);
+
     switch (scent.trigger_mode) {
       case "level":
         return conditionMet;
 
       case "edge_rising":
+        if (hysteresis > 0) return conditionMet && armed;
         return conditionMet && !scent.last_condition_met;
 
       case "edge_falling":
+        if (hysteresis > 0) return !conditionMet && armed;
         return !conditionMet && scent.last_condition_met;
 
       default:

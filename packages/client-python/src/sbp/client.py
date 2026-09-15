@@ -14,6 +14,7 @@ import httpx
 from sbp.types import (
     DecayModel,
     EmitResult,
+    TagFilter,
     SniffParams,
     SniffResult,
     RegisterScentParams,
@@ -234,6 +235,7 @@ class AsyncSbpClient:
         min_intensity: float = 0,
         limit: int = 100,
         include_evaporated: bool = False,
+        tags: TagFilter | dict | None = None,
     ) -> SniffResult:
         """Sniff the current environment state"""
         params = SniffParams(
@@ -242,6 +244,7 @@ class AsyncSbpClient:
             min_intensity=min_intensity,
             limit=limit,
             include_evaporated=include_evaporated,
+            tags=tags,
         )
 
         result = await self._rpc("sbp/sniff", params.model_dump(exclude_none=True))
@@ -260,6 +263,7 @@ class AsyncSbpClient:
         cooldown_ms: int = 0,
         activation_payload: dict[str, Any] | None = None,
         trigger_mode: str = "level",
+        hysteresis: float = 0,
         context_trails: list[str] | None = None,
     ) -> RegisterScentResult:
         """Register a scent (trigger condition)"""
@@ -273,6 +277,7 @@ class AsyncSbpClient:
             cooldown_ms=cooldown_ms,
             activation_payload=activation_payload or {},
             trigger_mode=trigger_mode,  # type: ignore
+            hysteresis=hysteresis,
             context_trails=context_trails,
         )
 
@@ -355,6 +360,7 @@ class AsyncSbpClient:
         *,
         prefix: str | None = None,
         limit: int = 100,
+        tags: TagFilter | dict | None = None,
     ) -> ReadResult:
         """Read traces from the blackboard"""
         params = ReadParams(
@@ -362,6 +368,7 @@ class AsyncSbpClient:
             keys=keys,
             prefix=prefix,
             limit=limit,
+            tags=tags,
         )
         result = await self._rpc("sbp/read", params.model_dump(exclude_none=True))
         return ReadResult.model_validate(result)
@@ -551,9 +558,12 @@ class SbpClient:
         *,
         min_intensity: float = 0,
         limit: int = 100,
+        tags: TagFilter | dict | None = None,
     ) -> SniffResult:
         return self._run(
-            self._async_client.sniff(trails, types, min_intensity=min_intensity, limit=limit)
+            self._async_client.sniff(
+                trails, types, min_intensity=min_intensity, limit=limit, tags=tags
+            )
         )
 
     def register_scent(
@@ -564,6 +574,7 @@ class SbpClient:
         agent_endpoint: str | None = None,
         cooldown_ms: int = 0,
         activation_payload: dict[str, Any] | None = None,
+        hysteresis: float = 0,
     ) -> RegisterScentResult:
         return self._run(
             self._async_client.register_scent(
@@ -571,6 +582,7 @@ class SbpClient:
                 agent_endpoint=agent_endpoint,
                 cooldown_ms=cooldown_ms,
                 activation_payload=activation_payload,
+                hysteresis=hysteresis,
             )
         )
 
@@ -615,9 +627,10 @@ class SbpClient:
         *,
         prefix: str | None = None,
         limit: int = 100,
+        tags: TagFilter | dict | None = None,
     ) -> ReadResult:
         return self._run(
-            self._async_client.read(trails, keys, prefix=prefix, limit=limit)
+            self._async_client.read(trails, keys, prefix=prefix, limit=limit, tags=tags)
         )
 
     def erase(

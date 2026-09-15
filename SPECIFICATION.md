@@ -195,7 +195,9 @@ function computeIntensity(pheromone: Pheromone, now: number): number {
     case "step":
       const steps = pheromone.decay_model.steps;
       for (let i = steps.length - 1; i >= 0; i--) {
-        if (elapsed >= steps[i].at_ms) return steps[i].intensity;
+        if (elapsed >= steps[i].at_ms) {
+          return Math.max(0, Math.min(steps[i].intensity, pheromone.initial_intensity));
+        }
       }
       return pheromone.initial_intensity;
 
@@ -204,6 +206,9 @@ function computeIntensity(pheromone: Pheromone, now: number): number {
   }
 }
 ```
+
+The computed intensity MUST NOT exceed the pheromone's `initial_intensity`; for
+every decay model it MUST be clamped to `[0, initial_intensity]`.
 
 ### 4.4 Trail Structure
 
@@ -671,6 +676,9 @@ The blackboard continuously evaluates registered scent conditions. Evaluation SH
 - On every EMIT that could affect a registered condition
 - Periodically (implementation-defined, recommended 100ms minimum)
 
+Implementations MUST dispatch triggers for different scents concurrently; a slow or blocked
+handler for one scent MUST NOT delay trigger delivery to another.
+
 ### 7.2 Cooldown
 
 After triggering, a scent MUST enter cooldown for `cooldown_ms`. During cooldown:
@@ -700,6 +708,40 @@ Optional edge-triggering mode:
   "hysteresis": 0.1               // Must fall 0.1 below threshold before re-triggering
 }
 ```
+
+**Hysteresis.** `hysteresis` (default `0`; range 0–1 per the JSON schema) refines edge
+triggering with a re-arm band (a schmitt trigger). It MUST be a strict no-op when `0`:
+an edge scent fires on every observed trigger-side transition of its condition, exactly
+as if hysteresis were not configured. It MUST be ignored for `level` mode, where
+cooldown alone governs repeat firing.
+
+When `hysteresis > 0`, each edge scent carries an armed flag, initially armed
+(re-registering the same `scent_id` MUST reset it to armed):
+
+- An `edge_rising` scent fires only while its condition is met AND the scent is armed;
+  an `edge_falling` scent fires only while its condition is not met AND the scent is
+  armed. Either mode disarms on firing.
+- While disarmed, the scent MUST NOT fire — even if the condition re-crosses the
+  threshold without leaving the band (e.g. met → not met → met for a rising scent
+  whose value never dropped below `threshold - hysteresis`).
+- While disarmed, the scent re-arms when the condition's evaluated value (the
+  aggregated signal, not individual pheromone intensities) has traveled at least
+  `hysteresis` beyond the threshold, away from the trigger side:
+  - `>` / `>=` thresholds: an `edge_rising` scent re-arms when
+    `value <= threshold - hysteresis`; an `edge_falling` scent re-arms when
+    `value >= threshold + hysteresis`.
+  - `<` / `<=` thresholds: the bands mirror the above (the trigger side lies below
+    the threshold, so the re-arm band lies above it).
+- Conditions that expose no numeric threshold (`composite`, `pattern`, `trace`) and
+  equality operators (`==`, `!=`) have no meaningful band; hysteresis degrades to
+  plain edge semantics: the scent re-arms on the first evaluation observing the
+  opposite condition state (not met for rising, met for falling).
+
+The re-arm test is an inequality on the value observed at each evaluation, not path
+tracking: a value that jumps across the entire band between evaluations satisfies the
+check at its observed endpoint. Once re-armed, the scent fires on the next trigger-side
+edge as usual. Hysteresis composes with cooldown: during cooldown the scent is not
+evaluated at all (§7.2), so re-arm observations resume only after cooldown expires.
 
 ### 7.5 Trace Conditions
 

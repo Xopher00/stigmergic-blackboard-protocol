@@ -30,7 +30,10 @@ export function computeIntensity(pheromone: Pheromone, now: number): number {
       // Find the applicable step (steps should be sorted by at_ms)
       for (let i = steps.length - 1; i >= 0; i--) {
         if (elapsed >= steps[i].at_ms) {
-          return steps[i].intensity;
+          // Invariant (SPECIFICATION.md §4.3): computed intensity never
+          // exceeds initial_intensity, so a step is clamped into
+          // [0, initial_intensity] like the other decay models.
+          return Math.max(0, Math.min(steps[i].intensity, pheromone.initial_intensity));
         }
       }
       return pheromone.initial_intensity;

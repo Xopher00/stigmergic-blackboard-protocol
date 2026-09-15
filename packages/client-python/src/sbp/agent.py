@@ -203,13 +203,15 @@ class SbpAgent:
         *,
         limit: int = 100,
         include_evaporated: bool = False,
+        tags: TagFilter | dict | None = None,
     ) -> SniffResult:
         """Sniff the current environment"""
         if not self._client:
             raise RuntimeError("Agent not running")
 
         return await self._client.sniff(
-            trails, types, min_intensity=min_intensity, limit=limit, include_evaporated=include_evaporated
+            trails, types, min_intensity=min_intensity, limit=limit,
+            include_evaporated=include_evaporated, tags=tags,
         )
 
     async def inscribe(
@@ -233,12 +235,13 @@ class SbpAgent:
         *,
         prefix: str | None = None,
         limit: int = 100,
+        tags: TagFilter | dict | None = None,
     ) -> ReadResult:
         """Read traces from the blackboard"""
         if not self._client:
             raise RuntimeError("Agent not running")
 
-        return await self._client.read(trails, keys, prefix=prefix, limit=limit)
+        return await self._client.read(trails, keys, prefix=prefix, limit=limit, tags=tags)
 
     async def erase(
         self,
@@ -262,6 +265,7 @@ class SbpAgent:
         cooldown_ms: int = 0,
         activation_payload: dict[str, Any] | None = None,
         trigger_mode: str = "level",
+        hysteresis: float = 0,
         context_trails: list[str] | None = None,
     ) -> RegisterScentResult:
         """Register a scent directly, callable any time — unlike on_scent()/when(),
@@ -277,6 +281,7 @@ class SbpAgent:
             cooldown_ms=cooldown_ms,
             activation_payload=activation_payload,
             trigger_mode=trigger_mode,
+            hysteresis=hysteresis,
             context_trails=context_trails,
         )
 

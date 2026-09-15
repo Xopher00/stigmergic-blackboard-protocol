@@ -13,6 +13,7 @@ import type {
   TraceCondition,
   TagFilter,
   Trace,
+  TriggerMode,
 } from "./types.js";
 import { computeIntensity, isEvaporated } from "./decay.js";
 
@@ -292,6 +293,33 @@ function compare(a: number, op: string, b: number): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * Re-arm test for a disarmed edge scent (SPECIFICATION.md §7.4): the value must
+ * travel hysteresis beyond the threshold away from the trigger side (full semantics there).
+ */
+export function shouldRearm(
+  condition: ScentCondition,
+  value: number,
+  met: boolean,
+  triggerMode: TriggerMode,
+  hysteresis: number
+): boolean {
+  const rising = triggerMode === "edge_rising";
+  if (condition.type === "threshold" || condition.type === "rate") {
+    if (condition.operator === ">=" || condition.operator === ">") {
+      return rising
+        ? value <= condition.value - hysteresis
+        : value >= condition.value + hysteresis;
+    }
+    if (condition.operator === "<=" || condition.operator === "<") {
+      return rising
+        ? value >= condition.value + hysteresis
+        : value <= condition.value - hysteresis;
+    }
+  }
+  return rising ? !met : met;
 }
 
 /**

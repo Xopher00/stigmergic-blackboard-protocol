@@ -25,6 +25,7 @@ build/
 .env.local
 *.local
 openrouter.conf
+.venv/
 
 # Logs
 *.log

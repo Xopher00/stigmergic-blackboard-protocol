@@ -122,6 +122,32 @@ describe("Decay Models", () => {
             expect(computeIntensity(p, p.emitted_at + 7500)).toBe(0.7);
             expect(computeIntensity(p, p.emitted_at + 15000)).toBe(0.3);
         });
+
+        it("clamps step intensity into [0, initial_intensity]", () => {
+            const p = makePheromone({
+                decay_model: {
+                    type: "step",
+                    steps: [
+                        { at_ms: 0, intensity: 2.0 },
+                        { at_ms: 5000, intensity: -0.5 },
+                    ],
+                },
+                initial_intensity: 0.5,
+            });
+            expect(computeIntensity(p, p.emitted_at + 0)).toBe(0.5);
+            expect(computeIntensity(p, p.emitted_at + 5000)).toBe(0);
+        });
+
+        it("never rises above initial_intensity over time", () => {
+            // Regression: a step intensity above initial_intensity must not
+            // make the computed intensity increase as elapsed time grows.
+            const p = makePheromone({
+                decay_model: { type: "step", steps: [{ at_ms: 1, intensity: 1.0 }] },
+                initial_intensity: 0.0,
+            });
+            expect(computeIntensity(p, p.emitted_at)).toBe(0.0);
+            expect(computeIntensity(p, p.emitted_at + 1)).toBe(0.0);
+        });
     });
 
     describe("Immortal Decay", () => {

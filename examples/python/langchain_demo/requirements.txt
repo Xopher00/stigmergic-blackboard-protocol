@@ -1,7 +1,9 @@
 langchain>=1.0.0
 langchain-openai>=0.3.0
 python-dotenv
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
 # For sbp_worker.py / complex_demo.py. standard_agent.py / sbp_agent.py use the older,
-# incompatible API -- see requirements-legacy.txt for those instead.
+# incompatible API -- see requirements-legacy.txt instead.
 # Install sbp-client from local package:
 # pip install -e ../../../packages/client-python

@@ -26,7 +26,10 @@ def compute_intensity(pheromone: Pheromone, now: int) -> float:
         # Find the applicable step (steps should be sorted by at_ms)
         for step in reversed(steps):
             if elapsed >= step["at_ms"]:
-                return step["intensity"]
+                # Invariant (SPECIFICATION.md §4.3): computed intensity never
+                # exceeds initial_intensity, so a step is clamped into
+                # [0, initial_intensity] like the other decay models.
+                return max(0.0, min(step["intensity"], pheromone.initial_intensity))
         return pheromone.initial_intensity
 
     elif decay.type == "immortal":
