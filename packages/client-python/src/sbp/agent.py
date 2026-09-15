@@ -21,6 +21,13 @@ from sbp.types import (
     InscribeResult,
     ReadResult,
     EraseResult,
+    EmitResult,
+    SniffResult,
+    RegisterScentResult,
+    DeregisterScentResult,
+    EvaporateResult,
+    InspectResult,
+    TagFilter,
 )
 
 
@@ -124,6 +131,9 @@ class SbpAgent:
         operator: str = ">=",
         value: float,
         cooldown_ms: int = 0,
+        tags: TagFilter | None = None,
+        activation_payload: dict[str, Any] | None = None,
+        context_trails: list[str] | None = None,
     ) -> Callable[[Callable[[TriggerPayload], Awaitable[None]]], Callable[[TriggerPayload], Awaitable[None]]]:
         """
         Simplified decorator for simple threshold conditions.
@@ -144,6 +154,7 @@ class SbpAgent:
                 aggregation=aggregation,  # type: ignore
                 operator=operator,  # type: ignore
                 value=value,
+                tags=tags,
             )
             self._scents.append(
                 ScentRegistration(
@@ -151,6 +162,8 @@ class SbpAgent:
                     condition=condition,
                     handler=func,
                     cooldown_ms=cooldown_ms,
+                    activation_payload=activation_payload or {},
+                    context_trails=context_trails,
                 )
             )
             return func
@@ -167,12 +180,12 @@ class SbpAgent:
         payload: dict[str, Any] | None = None,
         tags: list[str] | None = None,
         merge_strategy: str = "reinforce",
-    ) -> None:
+    ) -> EmitResult:
         """Emit a pheromone from this agent"""
         if not self._client:
             raise RuntimeError("Agent not running")
 
-        await self._client.emit(
+        return await self._client.emit(
             trail,
             type,
             intensity,
@@ -187,12 +200,17 @@ class SbpAgent:
         trails: list[str] | None = None,
         types: list[str] | None = None,
         min_intensity: float = 0,
-    ) -> Any:
+        *,
+        limit: int = 100,
+        include_evaporated: bool = False,
+    ) -> SniffResult:
         """Sniff the current environment"""
         if not self._client:
             raise RuntimeError("Agent not running")
 
-        return await self._client.sniff(trails, types, min_intensity=min_intensity)
+        return await self._client.sniff(
+            trails, types, min_intensity=min_intensity, limit=limit, include_evaporated=include_evaporated
+        )
 
     async def inscribe(
         self,
@@ -235,6 +253,78 @@ class SbpAgent:
 
         return await self._client.erase(trail, keys, older_than_ms=older_than_ms)
 
+    async def register_scent(
+        self,
+        scent_id: str,
+        condition: ScentCondition,
+        *,
+        agent_endpoint: str | None = None,
+        cooldown_ms: int = 0,
+        activation_payload: dict[str, Any] | None = None,
+        trigger_mode: str = "level",
+        context_trails: list[str] | None = None,
+    ) -> RegisterScentResult:
+        """Register a scent directly, callable any time — unlike on_scent()/when(),
+        which only stage a registration for run() to flush once at startup, this takes
+        effect immediately if the agent is already running."""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        return await self._client.register_scent(
+            scent_id,
+            condition,
+            agent_endpoint=agent_endpoint,
+            cooldown_ms=cooldown_ms,
+            activation_payload=activation_payload,
+            trigger_mode=trigger_mode,
+            context_trails=context_trails,
+        )
+
+    async def deregister_scent(self, scent_id: str) -> DeregisterScentResult:
+        """Deregister one scent directly, callable any time while running."""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        return await self._client.deregister_scent(scent_id)
+
+    async def evaporate(
+        self,
+        trail: str | None = None,
+        types: list[str] | None = None,
+        *,
+        older_than_ms: int | None = None,
+        below_intensity: float | None = None,
+    ) -> EvaporateResult:
+        """Force evaporation of pheromones matching criteria"""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        return await self._client.evaporate(
+            trail, types, older_than_ms=older_than_ms, below_intensity=below_intensity
+        )
+
+    async def inspect(self, include: list[str] | None = None) -> InspectResult:
+        """Inspect blackboard state"""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        return await self._client.inspect(include)
+
+    async def subscribe(self, scent_id: str, handler: Callable[[TriggerPayload], Awaitable[None]]) -> None:
+        """Subscribe a handler to an already-registered scent's triggers, callable any
+        time — pairs with register_scent() for watching a new condition while running."""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        await self._client.subscribe(scent_id, handler)
+
+    async def unsubscribe(self, scent_id: str) -> None:
+        """Unsubscribe from a scent's triggers directly, callable any time."""
+        if not self._client:
+            raise RuntimeError("Agent not running")
+
+        await self._client.unsubscribe(scent_id)
+
     async def run(self) -> None:
         """Run the agent, registering all scents and listening for triggers"""
         self._client = AsyncSbpClient(self.server_url, agent_id=self.agent_id, local=self.local)
@@ -268,6 +358,7 @@ class SbpAgent:
         finally:
             # Cleanup
             for scent in self._scents:
+                await self._client.unsubscribe(scent.scent_id)
                 await self._client.deregister_scent(scent.scent_id)
 
             await self._client.close()

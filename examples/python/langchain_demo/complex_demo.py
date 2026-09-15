@@ -1,108 +1,90 @@
+"""SBP + LangChain multi-agent demo, built on SbpWorker (see sbp_worker.py).
+
+Fully scent-driven: researcher and writer are both SbpWorker instances, neither ever
+called directly. The only non-reactive step is main()'s single bootstrap emit, which
+plays the role of "something outside the agent system" kicking things off — matching
+the OpenAI/Hugging Face Artifactory incident this whole experiment was inspired by,
+where nothing orchestrated the agents finding and building on each other's traces.
+"""
 import asyncio
 import os
+
 from dotenv import load_dotenv
-
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import tool
 
-from sbp.client import AsyncSbpClient
 from sbp.agent import SbpAgent
-from sbp.types import TriggerPayload
+from sbp.client import AsyncSbpClient
+from sbp_worker import SbpWorker
 
 load_dotenv()
 
-async def main():
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Please set OPENAI_API_KEY in .env file")
-        return
 
-    # 1. Setup SBP Client (Local Mode)
-    # local=True uses an in-memory blackboard, no server required!
-    sbp = AsyncSbpClient(local=True, agent_id="shared-client")
-    await sbp.connect()
+def _model() -> ChatOpenAI:
+    return ChatOpenAI(
+        model=os.environ["OPENROUTER_MODEL"],
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        timeout=60,
+    )
 
-    # 2. Define SBP Tools (Simple Decorators)
 
-    @tool
-    async def emit_signal(trail: str, type: str, content: str) -> str:
-        """Emit a signal to the blackboard."""
-        await sbp.emit(trail, type, intensity=0.8, payload={"content": content})
-        return f"Emitted '{type}' to '{trail}'"
+async def main() -> None:
+    researcher = SbpWorker(
+        "researcher",
+        _model(),
+        "You are a researcher. When woken up, find a fact about Mars and call sbp_emit "
+        "exactly once (trail='science.space', type='finding') to report it.",
+        listens_for={"trail": "research", "signal_type": "requested", "value": 0.5},
+        sbp_ops=["emit"],
+    )
+    writer = SbpWorker(
+        "writer",
+        _model(),
+        "You are a writer. When woken up, write a tweet about the finding described in "
+        "the blackboard state you were given, then call sbp_emit exactly once "
+        "(trail='social.twitter', type='draft') with the tweet as the summary.",
+        listens_for={"trail": "science.space", "signal_type": "finding", "value": 0.5},
+        sbp_ops=["emit"],
+    )
 
-    @tool
-    async def sniff_signals(trail: str) -> str:
-        """Check for signals on a trail."""
-        result = await sbp.sniff(trails=[trail], limit=5)
-        if not result.pheromones:
-            return "No signals found."
+    done = asyncio.Event()
+    observer = SbpAgent(agent_id="observer", local=True)
 
-        # Format for the LLM
-        return "\n".join(
-            f"- [{p.type}] {p.payload.get('content')}"
-            for p in result.pheromones
-        )
+    @observer.when(trail="social.twitter", signal_type="draft", value=0.5)
+    async def _on_tweet(trigger) -> None:
+        done.set()
 
-    tools = [emit_signal, sniff_signals]
+    worker_tasks = [asyncio.create_task(w.run()) for w in (researcher, writer)]
+    observer_task = asyncio.create_task(observer.run())
+    await asyncio.sleep(1)  # let scent registration land before the bootstrap emit
 
-    # 3. Helper to create agents
-    def make_agent(name: str, instruction: str):
-        llm = ChatOpenAI(temperature=0)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", f"You are {name}. {instruction}"),
-            ("user", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ])
-        agent = create_openai_functions_agent(llm, tools, prompt)
-        return AgentExecutor(agent=agent, tools=tools)
-
-    # 4. Create Agents
-    researcher = make_agent("Researcher", "Find facts and emit them to 'science.space' as 'finding'.")
-    writer = make_agent("Writer", "Write tweets about findings and emit them to 'social.twitter' as 'draft'.")
-
-    # 5. Make Writer Reactive (The "Magic" Part)
-    # We wrap the writer in an SBP Agent to listen for triggers
-    writer_sbp = SbpAgent(agent_id="writer-agent", local=True)
-
-    @writer_sbp.when(trail="science.space", signal_type="finding", value=0.5)
-    async def on_finding(trigger: TriggerPayload):
-        print(f"\n[Writer] 🔔 Waking up! Found new research data...")
-
-        # Get content from the signal that woke us up
-        content = trigger.context_pheromones[0].payload.get("content")
-
-        # Delegate to the LangChain agent
-        await writer.ainvoke({
-            "input": f"Write a tweet about this finding: {content}"
-        })
-
-    # 6. Run Simulation
-    print("--- Starting Multi-Agent System ---")
-    writer_task = asyncio.create_task(writer_sbp.run()) # Start listener in background
-    await asyncio.sleep(1)
+    bootstrap = AsyncSbpClient(local=True, agent_id="bootstrap")
+    await bootstrap.connect()
 
     try:
-        print("\n[Researcher] 🔎 Finding data...")
-        await researcher.ainvoke({
-            "input": "Research Mars and share a finding."
-        })
+        print("[bootstrap] requesting research...")
+        await bootstrap.emit("research", "requested", intensity=1.0, payload={"topic": "Mars"})
 
-        print("\n[System] ⏳ Waiting for Writer to react (stigmergy)...")
-        await asyncio.sleep(5)
+        print("[system] waiting for researcher -> writer to react (stigmergy)...")
+        try:
+            await asyncio.wait_for(done.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            print("[system] writer did not finish within 120s")
 
-        print("\n[System] 🔍 Verifying results...")
-        # Check if the tweet was posted
-        result = await sbp.sniff(trails=["social.twitter"], types=["draft"])
+        result = await bootstrap.sniff(trails=["social.twitter"], types=["draft"])
         if result.pheromones:
-            print(f"✅ SUCCESS! Found tweet: {result.pheromones[0].payload}")
+            print(f"\ntweet: {result.pheromones[0].payload}")
         else:
-            print("❌ No tweet found.")
-
+            print("\nno tweet found")
     finally:
-        writer_sbp.stop()
-        await writer_task
-        await sbp.close()
+        await bootstrap.close()
+        for w in (researcher, writer):
+            w.stop()
+        observer.stop()
+        for t in worker_tasks:
+            await t
+        await observer_task
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -16,7 +16,7 @@ from sbp.types import (
     RegisterScentParams, RegisterScentResult,
     DeregisterScentResult,
     EvaporateParams, EvaporateResult,
-    InspectResult, TriggerPayload, TagFilter,
+    InspectParams, InspectResult, TriggerPayload, TagFilter,
     Trace, InscribeParams, InscribeResult,
     ReadParams, ReadResult,
     EraseParams, EraseResult,
@@ -457,6 +457,81 @@ class LocalBlackboard:
             erased_count=len(to_remove),
             trails_affected=list(trails_affected),
         )
+
+    def evaporate(self, params: EvaporateParams) -> EvaporateResult:
+        """Force evaporation of pheromones matching criteria."""
+        now = self._now()
+        to_remove: List[str] = []
+        trails_affected: set[str] = set()
+
+        for pid, p in self.pheromones.items():
+            if params.trail and p.trail != params.trail:
+                continue
+            if params.types and p.type not in params.types:
+                continue
+            if params.older_than_ms is not None and now - p.emitted_at < params.older_than_ms:
+                continue
+            if params.below_intensity is not None and compute_intensity(p, now) >= params.below_intensity:
+                continue
+            if params.tags and not match_tags(p.tags, params.tags):
+                continue
+            to_remove.append(pid)
+            trails_affected.add(p.trail)
+
+        for pid in to_remove:
+            del self.pheromones[pid]
+
+        return EvaporateResult(
+            evaporated_count=len(to_remove),
+            trails_affected=list(trails_affected),
+        )
+
+    def inspect(self, params: InspectParams) -> InspectResult:
+        """Inspect blackboard state."""
+        now = self._now()
+        include = params.include or ["trails", "scents", "stats"]
+        result = InspectResult(timestamp=now)
+
+        if "trails" in include:
+            trail_map: Dict[str, Dict[str, float]] = {}
+            for p in self.pheromones.values():
+                if is_evaporated(p, now):
+                    continue
+                data = trail_map.setdefault(p.trail, {"count": 0, "intensity": 0.0})
+                data["count"] += 1
+                data["intensity"] += compute_intensity(p, now)
+            result.trails = [
+                {
+                    "name": name,
+                    "pheromone_count": int(data["count"]),
+                    "total_intensity": data["intensity"],
+                    "avg_intensity": data["intensity"] / data["count"] if data["count"] else 0,
+                }
+                for name, data in trail_map.items()
+            ]
+
+        if "scents" in include:
+            result.scents = [
+                {
+                    "scent_id": s["id"],
+                    "condition_met": s["last_condition_met"],
+                    "in_cooldown": bool(s["last_triggered_at"]) and (now - s["last_triggered_at"] < s["cooldown_ms"]),
+                    "last_triggered_at": s["last_triggered_at"] or None,
+                }
+                for s in self.scents.values()
+            ]
+
+        if "stats" in include:
+            active_count = sum(1 for p in self.pheromones.values() if not is_evaporated(p, now))
+            result.stats = {
+                "total_pheromones": len(self.pheromones),
+                "active_pheromones": active_count,
+                "total_scents": len(self.scents),
+                "total_traces": len(self.traces),
+                "uptime_ms": now - self.start_time,
+            }
+
+        return result
 
 
 # Singleton instance for shared local mode
