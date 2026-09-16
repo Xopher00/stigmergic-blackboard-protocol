@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-draft] — 2026-09-16
+
+### Added
+- `SbpWorker` — reusable SBP-reactive LangChain agent primitive
+- Adversarial test suite (server)
+
+### Fixed
+- **Trigger storms (P1.1)** — at most one running activation per trigger; skipped fires counted and reported; minimum re-fire interval for level-mode triggers; edge mode is the default; activation timeout (default 120 s)
+- **Zombie workers (P1.2)** — `stop()` deregisters every scent the agent registered (constructor and tool); a stopped agent can no longer be woken via the shared blackboard
+- **Ownership and namespaces (P1.3)** — scent registrations auto-prefixed `{agent_id}:{name}`; deregistration only works on the agent's own prefix; `subscribe` on an existing ID errors instead of silently overwriting; operator freeze list (`freeze`/`unfreeze`) refuses dispatches and tool calls for a prefix
+- **Permission holes (P1.4)** — `evaporate` with `trail=None` denied for workers with `allowed_trails`; `sbp_inspect` removed from the LLM tool surface (client method retained for operators)
+- **Untrusted-data labeling (P1.5)** — cross-agent payloads entering an LLM's context wrapped in `[UNTRUSTED DATA — written by agent "<id>" at <timestamp>]` markers; `SKILL.md` states labeling is not injection-proofing
+- **Failure visibility (P1.6)** — handler exceptions/timeouts emit a `system/stalled` signal plus one structured JSON log line; registrations on the `system` trail rejected by default to prevent cascades
+- Decay math: intensity could rise over time; now clamped
+- Trigger hysteresis: fields were declared but never enforced; now wired
+- Trigger dispatch: handlers ran sequentially; now concurrent (Python local mode and TS server)
+
+### Changed
+- Protocol version unified to `0.3.0-draft` across SPECIFICATION.md (wire examples, header table, internal changelog), README badge and status, and this changelog; package manifest versions remain `0.2.0` until next publish
+- SPECIFICATION.md numbering: INSCRIBE/READ were duplicated as §5.6/§5.7; renumbered to §5.8/§5.9, ERASE to §5.10 — the ten operations now occupy §5.1–§5.10 uniquely
+- README operation table corrected from eight to ten operations (Evaporate and Inspect added)
+- Dead `https://sbp.spec/...` URL in Appendix C replaced with repo-relative paths
+
+### Removed
+- `RateCondition` and `PatternCondition` removed from the public type surface and scent-condition evaluation in both SDKs; `ScentCondition` is now `ThresholdCondition | CompositeCondition | TraceCondition`, and register_scent rejects `rate`/`pattern` condition payloads
+
 ## 0.2.0
 
 ### Added

@@ -8,8 +8,6 @@ import type {
   ScentCondition,
   ThresholdCondition,
   CompositeCondition,
-  RateCondition,
-  PatternCondition,
   TraceCondition,
   TagFilter,
   Trace,
@@ -42,10 +40,6 @@ export function evaluateCondition(
       return evaluateThreshold(condition, ctx);
     case "composite":
       return evaluateComposite(condition, ctx);
-    case "rate":
-      return evaluateRate(condition, ctx);
-    case "pattern":
-      return evaluatePattern(condition, ctx);
     case "trace":
       return evaluateTrace(condition, ctx);
     default:
@@ -152,112 +146,6 @@ function evaluateComposite(
 }
 
 /**
- * Evaluate a rate condition
- */
-function evaluateRate(
-  condition: RateCondition,
-  ctx: EvaluationContext
-): EvaluationResult {
-  const { emissionHistory = [], now } = ctx;
-
-  // Filter emissions in the window
-  const windowStart = now - condition.window_ms;
-  const relevantEmissions = emissionHistory.filter(
-    (e) =>
-      e.trail === condition.trail &&
-      (condition.signal_type === "*" || e.type === condition.signal_type) &&
-      e.timestamp >= windowStart
-  );
-
-  let value: number;
-  if (condition.metric === "emissions_per_second") {
-    const windowSeconds = condition.window_ms / 1000;
-    value = relevantEmissions.length / windowSeconds;
-  } else {
-    // intensity_delta would require tracking intensity over time
-    // For now, approximate with emission count
-    value = relevantEmissions.length;
-  }
-
-  const met = compare(value, condition.operator, condition.value);
-
-  return {
-    met,
-    value,
-    matchingPheromoneIds: [],
-  };
-}
-
-/**
- * Evaluate a pattern condition
- * Checks if a sequence of pheromone emissions occurred within a time window
- */
-function evaluatePattern(
-  condition: PatternCondition,
-  ctx: EvaluationContext
-): EvaluationResult {
-  const { emissionHistory = [], now } = ctx;
-  const { sequence, window_ms, ordered = true } = condition;
-
-  // Filter emissions within the window
-  const windowStart = now - window_ms;
-  const relevant = emissionHistory.filter((e) => e.timestamp >= windowStart);
-
-  if (relevant.length === 0 || sequence.length === 0) {
-    return { met: false, value: 0, matchingPheromoneIds: [] };
-  }
-
-  if (ordered) {
-    // Ordered: each step must appear after the previous one
-    let searchFrom = 0;
-    let matchCount = 0;
-
-    for (const step of sequence) {
-      let found = false;
-      for (let i = searchFrom; i < relevant.length; i++) {
-        const emission = relevant[i];
-        if (
-          emission.trail === step.trail &&
-          emission.type === step.signal_type
-        ) {
-          found = true;
-          searchFrom = i + 1;
-          matchCount++;
-          break;
-        }
-      }
-      if (!found) break;
-    }
-
-    return {
-      met: matchCount === sequence.length,
-      value: matchCount / sequence.length,
-      matchingPheromoneIds: [],
-    };
-  } else {
-    // Unordered: all steps must appear in any order
-    const remaining = [...relevant];
-    let matchCount = 0;
-
-    for (const step of sequence) {
-      const idx = remaining.findIndex(
-        (e) => e.trail === step.trail && e.type === step.signal_type
-      );
-      if (idx >= 0) {
-        remaining.splice(idx, 1);
-        matchCount++;
-      }
-    }
-
-    return {
-      met: matchCount === sequence.length,
-      value: matchCount / sequence.length,
-      matchingPheromoneIds: [],
-    };
-  }
-}
-
-/**
  * Match tags against a filter
  */
 function matchTags(tags: string[], filter: TagFilter): boolean {
@@ -307,7 +195,7 @@ export function shouldRearm(
   hysteresis: number
 ): boolean {
   const rising = triggerMode === "edge_rising";
-  if (condition.type === "threshold" || condition.type === "rate") {
+  if (condition.type === "threshold") {
     if (condition.operator === ">=" || condition.operator === ">") {
       return rising
         ? value <= condition.value - hysteresis

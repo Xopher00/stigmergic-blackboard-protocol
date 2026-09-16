@@ -26,7 +26,7 @@ import type {
 
 - **Decay Models** — `ExponentialDecay`, `LinearDecay`, `StepDecay`, `ImmortalDecay`
 - **Data Types** — `Pheromone`, `PheromoneSnapshot`, `TagFilter`
-- **Conditions** — `ThresholdCondition`, `CompositeCondition`, `RateCondition`, `PatternCondition`
+- **Conditions** — `ThresholdCondition`, `CompositeCondition`, `TraceCondition`
 - **Operations** — All params/result types for emit, sniff, register, deregister, evaporate, inspect
 - **JSON-RPC** — Request, response, and error types
 - **Error Codes** — `SBP_ERROR_CODES` constant and `SbpError` class

@@ -1,7 +1,7 @@
 # Stigmergic Blackboard Protocol (SBP)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Spec Version](https://img.shields.io/badge/spec-v0.2.0-green.svg)](SPECIFICATION.md)
+[![Spec Version](https://img.shields.io/badge/spec-v0.3.0--draft-green.svg)](SPECIFICATION.md)
 [![CI](https://github.com/advicenxt/sbp/actions/workflows/ci.yml/badge.svg)](https://github.com/advicenxt/sbp/actions/workflows/ci.yml)
 
 **A coordination protocol for AI agents that work together without talking to each other.**
@@ -10,9 +10,7 @@
 
 ## The Problem
 
-You have multiple AI agents. They need to coordinate. Today, you wire them together with orchestrators, message queues, or direct calls — and every new agent means more glue code, more failure modes, and tighter coupling.
-
-What if agents could coordinate the way ants do?
+In 2026, OpenAI reported that its RL-trained eval agents — given shared access to a package server — started using it as a message board, leaving notes for each other and later exploiting it. The drive to coordinate through shared writable surfaces is *trained into* modern agents, not prompted into them. SBP is that surface, built on purpose — with limits, logging, and an off switch.
 
 Ants don't hold meetings. They don't send messages to specific ants. They leave **pheromone trails** in the environment, and other ants sense those trails and react. No coordinator. No routing. No address book. The colony self-organizes.
 
@@ -22,25 +20,6 @@ Ants don't hold meetings. They don't send messages to specific ants. They leave 
 2. **Traces** — Durable knowledge records that persist until explicitly erased. Perfect for institutional memory.
 
 Agents deposit signals, sense the environment, and respond when conditions are met. Coordination emerges from the environment, not from explicit wiring.
-
----
-
-## Where SBP Fits: Alongside MCP, Not Instead Of It
-
-If you're building with AI agents, you've probably seen [MCP (Model Context Protocol)](https://modelcontextprotocol.io/). MCP is excellent — it standardizes how an agent calls a tool, reads a resource, or gets a prompt. It's the standard for **agent → tool** interactions.
-
-But MCP doesn't answer a different question: **how do multiple agents coordinate with each other?**
-
-| | MCP | SBP |
-|---|---|---|
-| **What it solves** | How an agent uses tools | How agents coordinate together |
-| **Interaction** | Direct: "agent calls tool" | Indirect: "agent senses environment" |
-| **Coupling** | Agent knows the tool it's calling | Agents don't know each other exist |
-| **Pattern** | Request → Response | Emit → Sense → React |
-| **State** | Sessions between agent and server | Shared environmental state |
-| **Memory** | External to protocol | Built-in (Traces for durable, Pheromones for ephemeral) |
-
-**They're complementary.** Use MCP for tool invocation. Use SBP for multi-agent coordination.
 
 ---
 
@@ -62,7 +41,7 @@ But MCP doesn't answer a different question: **how do multiple agents coordinate
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Eight Operations
+### Ten Operations
 
 | Operation | Layer | What it does |
 |-----------|-------|-------------|
@@ -71,6 +50,8 @@ But MCP doesn't answer a different question: **how do multiple agents coordinate
 | **Register Scent** | Both | Declare "wake me up when these conditions are true" |
 | **Trigger** | Both | Blackboard activates a dormant agent |
 | **Deregister Scent** | Both | Remove a trigger condition |
+| **Evaporate** | Pheromone | Administrative: expire pheromones below the evaporation threshold |
+| **Inspect** | Pheromone | Dump full blackboard state (pheromones, traces, scents) for debugging |
 | **Inscribe** | Trace | Create or update a durable knowledge record |
 | **Read** | Trace | Query traces by trail, key, prefix, or tags |
 | **Erase** | Trace | Remove traces matching criteria |
@@ -80,8 +61,48 @@ But MCP doesn't answer a different question: **how do multiple agents coordinate
 - **Pheromones** have intensity (0.0–1.0) that decays over time. Strong signals demand attention; weak ones are background noise. Unreinforced data evaporates automatically.
 - **Traces** are versioned knowledge records addressed by `trail + key`. They never decay — use them for configuration, learned knowledge, audit trails, and institutional memory.
 - **Trails** are shared namespaces (e.g., `market.signals`, `config`) that organize both pheromones and traces.
-- **Scent conditions** are threshold rules that can combine both layers. An agent says "trigger me when volatility ≥ 0.7 AND risk-config exists" and then goes dormant until the environment wakes it.
+- **Scent conditions** are threshold rules that can combine both layers. An agent says "trigger me when volatility ≥ 0.7 AND risk-config exists" and then goes dormant — costing nothing — until the environment wakes it.
 - **Merge strategies** control what happens when you emit a pheromone that already exists — reinforce it, replace it, take the max, or add intensities.
+
+---
+
+## Where SBP Fits: Alongside MCP and A2A, Not Instead of Them
+
+If you're building with AI agents, you've probably seen [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) — the standard for **agent → tool** interactions. You may also have seen [A2A (Agent2Agent)](https://a2a-protocol.org/) — the standard for agents that *do* know each other and communicate directly, delegating tasks and streaming results back.
+
+SBP answers a question neither addresses: **how do agents coordinate when they don't know each other exist?** No routing, no address book — a shared environment they all read and write.
+
+| | MCP | A2A | SBP |
+|---|---|---|---|
+| **What it solves** | How an agent uses tools | How agents delegate to each other | How agents coordinate together |
+| **Interaction** | Direct: "agent calls tool" | Direct: "agent talks to agent" | Indirect: "agent senses environment" |
+| **Coupling** | Agent knows the tool it's calling | Agents know each other's identity | Agents don't know each other exist |
+| **Pattern** | Request → Response | Task → Updates → Result | Emit → Sense → React |
+| **State** | Sessions between agent and server | Task state between the two agents | Shared environmental state |
+| **Memory** | External to protocol | Private to each agent | Built-in (Traces for durable, Pheromones for ephemeral) |
+
+**All three are complementary.** Use MCP for tool invocation, A2A for direct agent-to-agent workflows, and SBP for coordination through a shared environment — they compose in the same system.
+
+---
+
+## Honest Limits
+
+SBP gives agents a shared writable surface. Board **data** can't execute anything — a pheromone payload is inert JSON — but the board **does wake LLMs**: a fired trigger is a real agent activation, and an LLM acting on attacker-controlled context is a real risk surface. Safety comes from the worker's permission layer (`allowed_trails`, scent ownership, `freeze`) and the operation journal (observability and forensics), not from the board being inert.
+
+**What is enforced:**
+
+- **Trail permissions** — a worker's `allowed_trails` gates which trails it can read, write, or evaporate.
+- **Scent ownership** — registrations are auto-prefixed with `{agent_id}:`; registering or deregistering under a foreign prefix is rejected.
+- **Pheromone decay** — nothing lingers forever by default; unreinforced signals evaporate.
+- **Append-only operation journal** — every operation, including reads, is logged with who, what, when, and outcome; `erase` writes a tombstone instead of deleting history.
+- **Operator freeze switch** — `freeze(prefix)` immediately stops a misbehaving agent's triggers from firing or registering new ones.
+
+**What is not solved:**
+
+- **Prompt injection.** Untrusted-data labeling makes injected payloads visible and traceable through the journal — it does **not** prevent an LLM from being manipulated by text in its context.
+- **Agent identity and authentication.** Any agent claiming an ID can act as that ID; nothing cryptographically verifies who is really making a call.
+- **Multi-tenant isolation.** One blackboard is one trust boundary — this is not a multi-tenant system.
+- **Secure webhook delivery.** Trigger delivery to `agent_endpoint` URLs is unauthenticated HTTP — see the warning in [SPECIFICATION.md](./SPECIFICATION.md).
 
 ---
 
@@ -205,7 +226,7 @@ Worker agents emit completion pheromones. An aggregator senses "5+ stage-1 compl
 1. **Stale-by-Default** — All pheromones decay. Unreinforced data evaporates automatically.
 2. **Durable When Needed** — Traces persist for institutional memory. Two timescales, one environment.
 3. **Sense, Don't Poll** — Agents declare interest patterns; the environment triggers them.
-4. **Stateless Agents** — Agents are dormant by default. No persistent state between activations.
+4. **Dormant by Default** — Agents hold no state between activations and cost nothing while waiting. Dormancy is a cost property, not a safety property — a fired trigger is a real agent activation.
 5. **Intensity Over Boolean** — Signals have continuous strength, enabling nuanced responses.
 
 ---
@@ -227,6 +248,7 @@ Worker agents emit completion pheromones. An aggregator senses "5+ stage-1 compl
 |----------|-------------|
 | [SPECIFICATION.md](./SPECIFICATION.md) | Complete protocol specification (RFC 2119) |
 | [QUICK_REFERENCE.md](./QUICK_REFERENCE.md) | Cheat sheet and diagrams |
+| [schemas/sbp-v0.1.schema.json](./schemas/sbp-v0.1.schema.json) | JSON Schema for message validation |
 | [schemas/openapi.yaml](./schemas/openapi.yaml) | OpenAPI 3.1 specification |
 | [CHANGELOG.md](./CHANGELOG.md) | Version history |
 | [docs/adr/](./docs/adr/) | Architecture Decision Records |
@@ -265,6 +287,7 @@ sbp/
 ├── QUICK_REFERENCE.md            # Cheat sheet
 ├── CHANGELOG.md                  # Version history
 ├── schemas/
+│   ├── sbp-v0.1.schema.json      # JSON Schema for message validation
 │   └── openapi.yaml              # OpenAPI 3.1 spec
 ├── docs/
 │   ├── adr/                      # Architecture Decision Records
@@ -284,7 +307,7 @@ sbp/
 
 ## Status
 
-**Version 0.2.0** — Stable dual-layer implementation with full SDK parity (TypeScript + Python).
+**Version 0.3.0-draft** — Stable dual-layer implementation with full SDK parity (TypeScript + Python). Fork-hardening round (trigger dispatch limits, ownership, permissions, untrusted-data labeling, failure visibility) in progress.
 
 ## Contributing
 

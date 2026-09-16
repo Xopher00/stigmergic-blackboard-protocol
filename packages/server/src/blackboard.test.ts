@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { Blackboard } from "../src/blackboard.js";
+import { MemoryStore } from "../src/store.js";
 
 describe("Blackboard", () => {
   let bb: Blackboard;
@@ -552,5 +553,59 @@ describe("Blackboard", () => {
       await bb.evaluateScents();
       expect(fired.length).toBe(2); // re-armed and met again -- should fire
     });
+  });
+});
+
+describe("Injectable Clock", () => {
+  // A store is injected where raw Pheromone fields (emitted_at) are asserted;
+  // sniff snapshots expose only age_ms, not the timestamps themselves.
+
+  it("uses the injected clock for emit timestamps", () => {
+    const store = new MemoryStore();
+    const bb = new Blackboard({ clock: () => 1000000, trackEmissionHistory: false, store });
+
+    const result = bb.emit({ trail: "test.signals", type: "event", intensity: 1 });
+    const p = store.get(result.pheromone_id)!;
+
+    expect(p.emitted_at).toBe(1000000);
+    expect(p.last_reinforced_at).toBe(1000000);
+  });
+
+  it("uses the injected clock for startTime (uptime tracks the fake clock)", () => {
+    let t = 1000000;
+    const bb = new Blackboard({ clock: () => t });
+
+    t = 2000000;
+    const result = bb.inspect({ include: ["stats"] });
+    expect(result.stats?.uptime_ms).toBe(1000000);
+  });
+
+  it("uses the injected clock for sniff decay", () => {
+    let t = 1000000;
+    const bb = new Blackboard({ clock: () => t });
+
+    bb.emit({
+      trail: "test.signals",
+      type: "event",
+      intensity: 1,
+      decay: { type: "exponential", half_life_ms: 10000 },
+    });
+
+    t = 1010000; // exactly one half-life later
+
+    const sniff = bb.sniff({ trails: ["test.signals"] });
+    expect(sniff.timestamp).toBe(1010000);
+    expect(sniff.pheromones).toHaveLength(1);
+    expect(sniff.pheromones[0].current_intensity).toBeCloseTo(0.5, 5);
+  });
+
+  it("falls back to real Date.now when no clock option is given", () => {
+    const store = new MemoryStore();
+    const bb = new Blackboard({ store });
+
+    const result = bb.emit({ trail: "test.signals", type: "event", intensity: 1 });
+    const p = store.get(result.pheromone_id)!;
+
+    expect(Math.abs(Date.now() - p.emitted_at)).toBeLessThan(5000);
   });
 });

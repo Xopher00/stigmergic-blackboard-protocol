@@ -112,53 +112,15 @@
       "required": ["type", "operator", "conditions"]
     },
 
-    "RateCondition": {
-      "type": "object",
-      "properties": {
-        "type": { "const": "rate" },
-        "trail": { "type": "string" },
-        "signal_type": { "type": "string" },
-        "metric": { "enum": ["emissions_per_second", "intensity_delta"] },
-        "window_ms": { "type": "integer", "minimum": 1 },
-        "operator": { "enum": [">=", ">", "<=", "<"] },
-        "value": { "type": "number" }
-      },
-      "required": ["type", "trail", "signal_type", "metric", "window_ms", "operator", "value"]
-    },
-
-    "PatternCondition": {
-      "type": "object",
-      "properties": {
-        "type": { "const": "pattern" },
-        "sequence": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "trail": { "type": "string" },
-              "signal_type": { "type": "string" },
-              "min_intensity": { "type": "number", "minimum": 0, "maximum": 1 }
-            },
-            "required": ["trail", "signal_type"]
-          },
-          "minItems": 2
-        },
-        "within_ms": { "type": "integer", "minimum": 1 }
-      },
-      "required": ["type", "sequence", "within_ms"]
-    },
-
     "ScentCondition": {
       "oneOf": [
         { "$ref": "#/definitions/ThresholdCondition" },
-        { "$ref": "#/definitions/CompositeCondition" },
-        { "$ref": "#/definitions/RateCondition" },
-        { "$ref": "#/definitions/PatternCondition" }
+        { "$ref": "#/definitions/CompositeCondition" }
       ]
     },
 
     "MergeStrategy": {
-      "enum": ["reinforce", "replace", "max", "add", "new"]
+      "enum": ["reinforce", "replace", "add", "new"]
     }
   },
 

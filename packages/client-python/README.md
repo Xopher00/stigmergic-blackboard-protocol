@@ -128,14 +128,13 @@ CompositeCondition(
     conditions=[condition1, condition2],
 )
 
-# Rate-based
-RateCondition(
+# Count-based threshold
+ThresholdCondition(
     trail="events",
     signal_type="click",
-    metric="emissions_per_second",
-    window_ms=10000,
+    aggregation="count",
     operator=">=",
-    value=5.0,
+    value=5,
 )
 ```
 

@@ -49,17 +49,7 @@ export interface CompositeCondition {
   conditions: ScentCondition[];
 }
 
-export interface RateCondition {
-  type: "rate";
-  trail: string;
-  signal_type: string;
-  metric: "emissions_per_second" | "intensity_delta";
-  window_ms: number;
-  operator: ">=" | ">" | "<=" | "<";
-  value: number;
-}
-
-export type ScentCondition = ThresholdCondition | CompositeCondition | RateCondition | TraceCondition;
+export type ScentCondition = ThresholdCondition | CompositeCondition | TraceCondition;
 
 export interface TraceCondition {
   type: "trace";

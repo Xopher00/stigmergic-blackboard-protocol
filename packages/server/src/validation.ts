@@ -68,31 +68,6 @@ const ThresholdConditionSchema = z.object({
   value: z.number(),
 });
 
-const RateConditionSchema = z.object({
-  type: z.literal("rate"),
-  trail: z.string().min(1),
-  signal_type: z.string().min(1),
-  metric: z.enum(["emissions_per_second", "intensity_delta"]),
-  window_ms: z.number().positive(),
-  operator: z.enum([">=", ">", "<=", "<"]),
-  value: z.number(),
-});
-
-const PatternConditionSchema = z.object({
-  type: z.literal("pattern"),
-  sequence: z
-    .array(
-      z.object({
-        trail: z.string().min(1),
-        signal_type: z.string().min(1),
-        min_intensity: z.number().min(0).max(1).optional(),
-      })
-    )
-    .min(1),
-  window_ms: z.number().positive(),
-  ordered: z.boolean().optional(),
-});
-
 const TraceConditionSchema = z.object({
   type: z.literal("trace"),
   trail: z.string().min(1),
@@ -111,8 +86,6 @@ const ScentConditionSchema: z.ZodType = z.lazy(() =>
       operator: z.enum(["and", "or", "not"]),
       conditions: z.array(ScentConditionSchema).min(1),
     }),
-    RateConditionSchema,
-    PatternConditionSchema,
     TraceConditionSchema,
   ])
 );
@@ -128,7 +101,7 @@ export const EmitParamsSchema = z.object({
   decay: DecayModelSchema.optional(),
   payload: z.record(z.unknown()).optional(),
   tags: z.array(z.string()).optional(),
-  merge_strategy: z.enum(["reinforce", "replace", "max", "add", "new"]).optional(),
+  merge_strategy: z.enum(["reinforce", "replace", "add", "new"]).optional(),
   source_agent: z.string().optional(),
 });
 

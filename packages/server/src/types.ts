@@ -87,30 +87,6 @@ export interface CompositeCondition {
   conditions: ScentCondition[];
 }
 
-export interface RateCondition {
-  type: "rate";
-  trail: string;
-  signal_type: string;
-  metric: "emissions_per_second" | "intensity_delta";
-  window_ms: number;
-  operator: ">=" | ">" | "<=" | "<";
-  value: number;
-}
-
-export interface PatternCondition {
-  type: "pattern";
-  /** Sequence of pheromone types to match */
-  sequence: Array<{
-    trail: string;
-    signal_type: string;
-    min_intensity?: number;
-  }>;
-  /** Time window in which the full sequence must appear */
-  window_ms: number;
-  /** Whether the sequence must appear in order (default: true) */
-  ordered?: boolean;
-}
-
 export interface TraceCondition {
   type: "trace";
   trail: string;
@@ -120,13 +96,13 @@ export interface TraceCondition {
   expected?: unknown;            // Expected value for comparison
 }
 
-export type ScentCondition = ThresholdCondition | CompositeCondition | RateCondition | PatternCondition | TraceCondition;
+export type ScentCondition = ThresholdCondition | CompositeCondition | TraceCondition;
 
 // ============================================================================
 // SCENT REGISTRATION
 // ============================================================================
 
-export type MergeStrategy = "reinforce" | "replace" | "max" | "add" | "new";
+export type MergeStrategy = "reinforce" | "replace" | "add" | "new";
 export type TriggerMode = "level" | "edge_rising" | "edge_falling";
 
 export interface Scent {

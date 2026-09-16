@@ -293,10 +293,9 @@ Deposit a new pheromone or reinforce an existing one.
 ```
 
 **Merge Strategies:**
-- `"reinforce"`: If matching pheromone exists, boost intensity and reset decay timer
-- `"replace"`: Replace existing pheromone entirely
-- `"max"`: Take maximum of existing and new intensity
-- `"add"`: Add intensities (capped at 1.0)
+- `"reinforce"`: New intensity is `max(current computed intensity, emitted intensity)` — MUST never lower the pheromone's current intensity; resets the decay timer
+- `"replace"`: Unconditionally sets intensity to the emitted value (may lower it); overwrites payload and tags; resets the decay timer
+- `"add"`: New intensity is `min(1.0, current computed intensity + emitted intensity)`; resets the decay timer
 - `"new"`: Always create new pheromone (no merging)
 
 **Matching for Merge:**
@@ -403,14 +402,18 @@ Declare a threshold condition that triggers agent activation. This is how agents
 }
 ```
 
+> **⚠️ SECURITY WARNING — WEBHOOK DELIVERY IS UNAUTHENTICATED.**
+> Scent activation deliveries to `agent_endpoint` are plain HTTP POSTs with no authentication in
+> either direction: the receiver cannot verify a trigger really came from the blackboard, and the
+> blackboard presents no credentials. **Webhook delivery is unauthenticated; do not expose in
+> production.**
+
 **Condition Types:**
 
 ```typescript
 type ScentCondition =
   | ThresholdCondition
   | CompositeCondition
-  | RateCondition
-  | PatternCondition
 
 interface ThresholdCondition {
   type: "threshold";
@@ -426,22 +429,6 @@ interface CompositeCondition {
   type: "composite";
   operator: "and" | "or" | "not";
   conditions: ScentCondition[];
-}
-
-interface RateCondition {
-  type: "rate";
-  trail: string;
-  signal_type: string;
-  metric: "emissions_per_second" | "intensity_delta";
-  window_ms: number;
-  operator: ">=" | ">" | "<=" | "<";
-  value: number;
-}
-
-interface PatternCondition {
-  type: "pattern";
-  sequence: SequenceStep[];
-  within_ms: number;
 }
 ```
 
@@ -547,7 +534,7 @@ Get metadata about trails, registered scents, and system state.
 }
 ```
 
-### 5.6 INSCRIBE
+### 5.8 INSCRIBE
 
 Create or update a durable trace. If a trace with the same `trail + key` already exists, it is updated and its `version` is incremented.
 
@@ -578,7 +565,7 @@ The `action` field MUST be `"created"` for new traces or `"updated"` for existin
 
 Servers MAY require elevated API keys for INSCRIBE operations (see Section 11).
 
-### 5.7 READ
+### 5.9 READ
 
 Read traces matching filter criteria. All filter parameters are OPTIONAL; omitting all returns all traces.
 
@@ -616,7 +603,7 @@ Read traces matching filter criteria. All filter parameters are OPTIONAL; omitti
 }
 ```
 
-### 5.8 ERASE
+### 5.10 ERASE
 
 Remove traces matching filter criteria.
 
@@ -654,7 +641,7 @@ All timestamps use Unix milliseconds (UTC). Implementations SHOULD use monotonic
 
 When a pheromone is reinforced, the implementation MUST:
 1. Update `last_reinforced_at` to the current time
-2. Update `initial_intensity` to the new intensity
+2. Update `initial_intensity` to `max(current computed intensity, emitted intensity)` — reinforcement MUST never lower the pheromone's current intensity
 3. Reset the decay timer
 
 This models biological pheromone behavior where repeated deposits strengthen a trail.
@@ -891,7 +878,7 @@ Host: blackboard.example.com
 Content-Type: application/json
 Accept: application/json, text/event-stream
 Sbp-Session-Id: abc123
-Sbp-Protocol-Version: 0.1
+Sbp-Protocol-Version: 0.3.0-draft
 
 {
   "jsonrpc": "2.0",
@@ -915,7 +902,7 @@ GET /sbp HTTP/1.1
 Host: blackboard.example.com
 Accept: text/event-stream
 Sbp-Session-Id: abc123
-Sbp-Protocol-Version: 0.1
+Sbp-Protocol-Version: 0.3.0-draft
 ```
 
 **SSE Response Stream:**
@@ -1035,7 +1022,7 @@ Agent                                    Blackboard
 |--------|-----------|-------------|
 | `Content-Type` | Both | `application/json` for POST body, `text/event-stream` for SSE |
 | `Accept` | Request | `application/json, text/event-stream` |
-| `Sbp-Protocol-Version` | Request | Protocol version (e.g., `0.1`) |
+| `Sbp-Protocol-Version` | Request | Protocol version (e.g., `0.3.0-draft`) |
 | `Sbp-Session-Id` | Both | Session identifier (after initial request) |
 | `Sbp-Agent-Id` | Request | Agent identifier (optional) |
 | `Last-Event-ID` | Request | Last received SSE event ID (for resumability) |
@@ -1159,9 +1146,10 @@ A conformant SBP implementation MUST support:
 │  │   Store     │  │  Evaluator  │  │   Dispatcher        │ │
 │  │             │  │             │  │                     │ │
 │  │ - In-memory │  │ - Condition │  │ - Webhook delivery  │ │
-│  │ - Redis     │  │   matching  │  │ - WebSocket push    │ │
-│  │ - SQLite    │  │ - Rate      │  │ - Retry logic       │ │
-│  │             │  │   tracking  │  │ - Cooldown mgmt     │ │
+│  │ - Redis     │  │   matching  │  │   (unauthenticated) │ │
+│  │ - SQLite    │  │             │  │ - WebSocket push    │ │
+│  │             │  │             │  │ - Retry logic       │ │
+│  │             │  │             │  │ - Cooldown mgmt     │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
@@ -1286,8 +1274,11 @@ await blackboard.emit(
 
 ## Appendix C: JSON Schema
 
-Complete JSON schemas for all message types are available at:
-`https://sbp.spec/schemas/v0.1/`
+Complete JSON schemas for all message types are available in this repository
+(paths relative to the repository root):
+
+- [`schemas/sbp-v0.1.schema.json`](schemas/sbp-v0.1.schema.json) — JSON Schema for message validation
+- [`schemas/openapi.yaml`](schemas/openapi.yaml) — OpenAPI 3.1 specification
 
 ---
 
@@ -1306,3 +1297,10 @@ This specification draws inspiration from:
 
 ### 0.1.0-draft (2026-02-07)
 - Initial draft specification
+
+### 0.2.0
+- Trace layer: INSCRIBE, READ, ERASE; TraceCondition; trace-specific auth
+
+### 0.3.0-draft (2026-09-16)
+- Fork hardening: trigger dispatch limits, scent ownership, permission enforcement, untrusted-data labeling, failure visibility
+- Docs cleanup: unique §5.1–§5.10 numbering, ten-operation README table, repo-relative schema paths, protocol version unified to 0.3.0-draft

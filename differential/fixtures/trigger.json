@@ -1,0 +1,106 @@
+[
+  {
+    "name": "threshold_sum_aggregation_met",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "sum", "operator": ">=", "value": 0.5
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.3, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.4, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": true,
+    "expected_value": 0.7
+  },
+  {
+    "name": "threshold_max_aggregation_not_met",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "max", "operator": ">=", "value": 0.5
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.3, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.4, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": false,
+    "expected_value": 0.4
+  },
+  {
+    "name": "threshold_avg_aggregation",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "avg", "operator": ">", "value": 0.3
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.2, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.4, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.6, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": true,
+    "expected_value": 0.4
+  },
+  {
+    "name": "threshold_count_aggregation",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "count", "operator": ">=", "value": 3
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.1, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.1, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.1, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": true,
+    "expected_value": 3
+  },
+  {
+    "name": "threshold_any_aggregation",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "any", "operator": ">=", "value": 1
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.05, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": true,
+    "expected_value": 1
+  },
+  {
+    "name": "threshold_tag_filter_excludes_non_matching",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "sum", "operator": ">=", "value": 0.5,
+      "tags": { "all": ["urgent"] }
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.4, "tags": ["urgent"], "ttl_floor": 0.01, "elapsed_ms": 0 },
+      { "trail": "t", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.4, "tags": ["other"], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": false,
+    "expected_value": 0.4
+  },
+  {
+    "name": "threshold_evaporated_pheromone_excluded",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "sum", "operator": ">=", "value": 0.1
+    },
+    "pheromones": [
+      { "trail": "t", "type": "e", "decay_model": { "type": "exponential", "half_life_ms": 10 }, "initial_intensity": 0.9, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 1000 }
+    ],
+    "expected_met": false,
+    "expected_value": 0
+  },
+  {
+    "name": "threshold_no_matching_trail",
+    "condition": {
+      "type": "threshold", "trail": "t", "signal_type": "e",
+      "aggregation": "sum", "operator": ">=", "value": 0.1
+    },
+    "pheromones": [
+      { "trail": "other-trail", "type": "e", "decay_model": { "type": "immortal" }, "initial_intensity": 0.9, "tags": [], "ttl_floor": 0.01, "elapsed_ms": 0 }
+    ],
+    "expected_met": false,
+    "expected_value": 0
+  }
+]

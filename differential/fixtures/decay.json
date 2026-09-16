@@ -1,0 +1,91 @@
+[
+  {
+    "name": "exponential_at_zero_elapsed",
+    "decay_model": { "type": "exponential", "half_life_ms": 1000 },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 0,
+    "expected_intensity": 1.0
+  },
+  {
+    "name": "exponential_at_one_half_life",
+    "decay_model": { "type": "exponential", "half_life_ms": 1000 },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 1000,
+    "expected_intensity": 0.5
+  },
+  {
+    "name": "exponential_at_two_half_lives",
+    "decay_model": { "type": "exponential", "half_life_ms": 1000 },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 2000,
+    "expected_intensity": 0.25
+  },
+  {
+    "name": "linear_at_half_elapsed",
+    "decay_model": { "type": "linear", "rate_per_ms": 0.001 },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 500,
+    "expected_intensity": 0.5
+  },
+  {
+    "name": "linear_clamps_at_zero",
+    "decay_model": { "type": "linear", "rate_per_ms": 0.001 },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 2000,
+    "expected_intensity": 0.0
+  },
+  {
+    "name": "step_holds_before_next_boundary",
+    "decay_model": {
+      "type": "step",
+      "steps": [
+        { "at_ms": 0, "intensity": 1.0 },
+        { "at_ms": 1000, "intensity": 0.5 },
+        { "at_ms": 2000, "intensity": 0.0 }
+      ]
+    },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 500,
+    "expected_intensity": 1.0
+  },
+  {
+    "name": "step_after_first_boundary",
+    "decay_model": {
+      "type": "step",
+      "steps": [
+        { "at_ms": 0, "intensity": 1.0 },
+        { "at_ms": 1000, "intensity": 0.5 },
+        { "at_ms": 2000, "intensity": 0.0 }
+      ]
+    },
+    "initial_intensity": 1.0,
+    "elapsed_ms": 1500,
+    "expected_intensity": 0.5
+  },
+  {
+    "name": "step_clamps_into_initial_intensity",
+    "decay_model": {
+      "type": "step",
+      "steps": [
+        { "at_ms": 0, "intensity": 2.0 }
+      ]
+    },
+    "initial_intensity": 0.5,
+    "elapsed_ms": 0,
+    "expected_intensity": 0.5
+  },
+  {
+    "name": "immortal_never_decays",
+    "decay_model": { "type": "immortal" },
+    "initial_intensity": 0.7,
+    "elapsed_ms": 999999999,
+    "expected_intensity": 0.7
+  },
+  {
+    "name": "respects_reduced_initial_intensity",
+    "decay_model": { "type": "exponential", "half_life_ms": 1000 },
+    "initial_intensity": 0.6,
+    "elapsed_ms": 1000,
+    "expected_intensity": 0.3
+  }
+]

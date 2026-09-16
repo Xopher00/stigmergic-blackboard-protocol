@@ -3,10 +3,11 @@
  * Protocol-level tests to verify any SBP implementation against the spec
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Blackboard } from "./blackboard.js";
 import { computeIntensity, isEvaporated } from "./decay.js";
 import { evaluateCondition } from "./conditions.js";
+import { RegisterScentParamsSchema } from "./validation.js";
 import type { Pheromone, ScentCondition } from "./types.js";
 
 // -- Test Helpers --
@@ -194,11 +195,16 @@ describe("Merge Strategies", () => {
         bb = new Blackboard({ trackEmissionHistory: false });
     });
 
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("reinforce: resets decay clock", () => {
         const r1 = bb.emit({
             trail: "merge",
             type: "test",
             intensity: 0.8,
+            decay: { type: "immortal" },
             merge_strategy: "new",
         });
         expect(r1.action).toBe("created");
@@ -206,10 +212,11 @@ describe("Merge Strategies", () => {
         const r2 = bb.emit({
             trail: "merge",
             type: "test",
-            intensity: 0.9,
+            intensity: 0.3,
             merge_strategy: "reinforce",
         });
         expect(r2.action).toBe("reinforced");
+        expect(r2.new_intensity).toBeGreaterThanOrEqual(r1.new_intensity - 1e-9);
     });
 
     it("replace: overwrites payload and tags", () => {
@@ -236,22 +243,79 @@ describe("Merge Strategies", () => {
         expect(sniff.pheromones[0].tags).toEqual(["tag2"]);
     });
 
-    it("max: picks higher intensity", () => {
+    it("reinforce: never lowers current computed intensity", () => {
+        vi.useFakeTimers();
+        const t0 = Date.now();
         bb.emit({
             trail: "merge",
-            type: "max-test",
+            type: "floor-test",
+            intensity: 0.9,
+            decay: { type: "exponential", half_life_ms: 10000 },
+            merge_strategy: "new",
+        });
+
+        vi.setSystemTime(t0 + 7400);
+        const c = bb.sniff({ trails: ["merge"], types: ["floor-test"] }).pheromones[0]
+            .current_intensity;
+        expect(c).toBeCloseTo(0.539, 2);
+
+        const r = bb.emit({
+            trail: "merge",
+            type: "floor-test",
             intensity: 0.3,
+            merge_strategy: "reinforce",
+        });
+        expect(r.action).toBe("reinforced");
+        expect(r.new_intensity).toBeGreaterThanOrEqual(c - 1e-9);
+    });
+
+    it("reinforce: refreshes decay timestamp", () => {
+        vi.useFakeTimers();
+        const t0 = Date.now();
+        bb.emit({
+            trail: "merge",
+            type: "refresh-test",
+            intensity: 0.9,
+            decay: { type: "exponential", half_life_ms: 10000 },
+            merge_strategy: "new",
+        });
+
+        vi.setSystemTime(t0 + 7400);
+        const c = bb.sniff({ trails: ["merge"], types: ["refresh-test"] }).pheromones[0]
+            .current_intensity;
+
+        bb.emit({
+            trail: "merge",
+            type: "refresh-test",
+            intensity: 0.3,
+            merge_strategy: "reinforce",
+        });
+
+        vi.setSystemTime(t0 + 17400);
+        const later = bb.sniff({ trails: ["merge"], types: ["refresh-test"] }).pheromones[0]
+            .current_intensity;
+        // Clock refreshed at reinforce ⇒ one further half-life from c: expect c/2.
+        // Decaying from the original emit time, or a lowering reinforce, gives ≈0.16/0.15.
+        expect(later).toBeCloseTo(c / 2, 1);
+    });
+
+    it("replace: can lower intensity", () => {
+        bb.emit({
+            trail: "merge",
+            type: "lower-test",
+            intensity: 0.9,
+            decay: { type: "immortal" },
             merge_strategy: "new",
         });
 
         const r = bb.emit({
             trail: "merge",
-            type: "max-test",
-            intensity: 0.9,
-            merge_strategy: "max",
+            type: "lower-test",
+            intensity: 0.3,
+            merge_strategy: "replace",
         });
-        expect(r.action).toBe("merged");
-        expect(r.new_intensity).toBeGreaterThanOrEqual(0.9);
+        expect(r.action).toBe("replaced");
+        expect(r.new_intensity).toBe(0.3);
     });
 
     it("add: sums intensities (clamped to 1.0)", () => {
@@ -269,6 +333,7 @@ describe("Merge Strategies", () => {
             merge_strategy: "add",
         });
         expect(r.action).toBe("merged");
+        expect(r.new_intensity).toBeCloseTo(1.0);
         expect(r.new_intensity).toBeLessThanOrEqual(1.0);
     });
 
@@ -287,6 +352,61 @@ describe("Merge Strategies", () => {
         });
         expect(r1.pheromone_id).not.toBe(r2.pheromone_id);
         expect(r2.action).toBe("created");
+    });
+
+    it("strategies are behaviorally distinct", () => {
+        const finalIntensity = (strategy: "reinforce" | "replace" | "add") => {
+            const board = new Blackboard({ trackEmissionHistory: false });
+            const emits = [0.9, 0.3, 0.6].map((intensity) =>
+                board.emit({
+                    trail: "distinct",
+                    type: "t",
+                    intensity,
+                    decay: { type: "immortal" },
+                    merge_strategy: strategy,
+                }),
+            );
+            return emits[emits.length - 1].new_intensity;
+        };
+
+        const reinforce = finalIntensity("reinforce");
+        const replace = finalIntensity("replace");
+        const add = finalIntensity("add");
+
+        expect(reinforce).toBeCloseTo(0.9, 6);
+        expect(replace).toBeCloseTo(0.6, 6);
+        expect(add).toBeCloseTo(1.0, 6);
+        expect(reinforce).not.toBe(replace);
+        expect(reinforce).not.toBe(add);
+        expect(replace).not.toBe(add);
+    });
+
+    it("grid sweep: reinforce == max, add == min(1, sum), replace == second", () => {
+        const grid = Array.from({ length: 21 }, (_, i) => i * 0.05);
+        const emitPair = (
+            strategy: "reinforce" | "replace" | "add",
+            first: number,
+            second: number,
+        ) => {
+            const board = new Blackboard({ trackEmissionHistory: false });
+            const trail = `grid/${strategy}/${first}/${second}`;
+            board.emit({ trail, type: "t", intensity: first, decay: { type: "immortal" } });
+            return board.emit({ trail, type: "t", intensity: second, merge_strategy: strategy });
+        };
+
+        for (const first of grid) {
+            for (const second of grid) {
+                expect(emitPair("reinforce", first, second).new_intensity).toBeCloseTo(
+                    Math.max(first, second),
+                    10,
+                );
+                expect(emitPair("add", first, second).new_intensity).toBeCloseTo(
+                    Math.min(1.0, first + second),
+                    10,
+                );
+                expect(emitPair("replace", first, second).new_intensity).toBeCloseTo(second, 10);
+            }
+        }
     });
 });
 
@@ -434,126 +554,45 @@ describe("Condition Evaluation", () => {
         });
     });
 
-    describe("Rate Conditions", () => {
-        it("detects emission rate", () => {
-            const history = [
-                { trail: "a", type: "alert", timestamp: now - 100 },
-                { trail: "a", type: "alert", timestamp: now - 200 },
-                { trail: "a", type: "alert", timestamp: now - 300 },
-            ];
+});
 
-            const condition: ScentCondition = {
-                type: "rate",
-                trail: "a",
-                signal_type: "alert",
-                metric: "emissions_per_second",
-                window_ms: 1000,
-                operator: ">=",
-                value: 2.0,
-            };
-            const result = evaluateCondition(condition, {
-                pheromones,
-                now,
-                emissionHistory: history,
-            });
-            expect(result.met).toBe(true);
-            expect(result.value).toBe(3.0); // 3 emissions per 1 second window
+// ============================================================================
+// REMOVED CONDITION TYPES (rate / pattern)
+// ============================================================================
+
+describe("Removed Condition Types", () => {
+    // Payloads below are well-formed per the OLD rate/pattern definitions, so they are
+    // only rejected once those types leave the ScentCondition union — red until then.
+    const wellFormedRateCondition = {
+        type: "rate",
+        trail: "t",
+        signal_type: "alert",
+        metric: "emissions_per_second",
+        window_ms: 1000,
+        operator: ">=",
+        value: 5,
+    };
+
+    const wellFormedPatternCondition = {
+        type: "pattern",
+        sequence: [{ trail: "t", signal_type: "step-1" }],
+        window_ms: 1000,
+    };
+
+    it("rejects a register_scent rate condition", () => {
+        const result = RegisterScentParamsSchema.safeParse({
+            scent_id: "removed-rate",
+            condition: wellFormedRateCondition,
         });
+        expect(result.success).toBe(false);
     });
 
-    describe("Pattern Conditions", () => {
-        it("matches ordered sequence", () => {
-            const history = [
-                { trail: "pipeline", type: "step-1", timestamp: now - 300 },
-                { trail: "pipeline", type: "step-2", timestamp: now - 200 },
-                { trail: "pipeline", type: "step-3", timestamp: now - 100 },
-            ];
-
-            const condition: ScentCondition = {
-                type: "pattern",
-                sequence: [
-                    { trail: "pipeline", signal_type: "step-1" },
-                    { trail: "pipeline", signal_type: "step-2" },
-                    { trail: "pipeline", signal_type: "step-3" },
-                ],
-                window_ms: 1000,
-                ordered: true,
-            };
-            const result = evaluateCondition(condition, {
-                pheromones: [],
-                now,
-                emissionHistory: history,
-            });
-            expect(result.met).toBe(true);
+    it("rejects a register_scent pattern condition", () => {
+        const result = RegisterScentParamsSchema.safeParse({
+            scent_id: "removed-pattern",
+            condition: wellFormedPatternCondition,
         });
-
-        it("rejects wrong order when ordered is true", () => {
-            const history = [
-                { trail: "pipeline", type: "step-3", timestamp: now - 300 },
-                { trail: "pipeline", type: "step-1", timestamp: now - 200 },
-                { trail: "pipeline", type: "step-2", timestamp: now - 100 },
-            ];
-
-            const condition: ScentCondition = {
-                type: "pattern",
-                sequence: [
-                    { trail: "pipeline", signal_type: "step-1" },
-                    { trail: "pipeline", signal_type: "step-2" },
-                    { trail: "pipeline", signal_type: "step-3" },
-                ],
-                window_ms: 1000,
-                ordered: true,
-            };
-            const result = evaluateCondition(condition, {
-                pheromones: [],
-                now,
-                emissionHistory: history,
-            });
-            expect(result.met).toBe(false);
-        });
-
-        it("matches unordered sequence", () => {
-            const history = [
-                { trail: "pipeline", type: "step-3", timestamp: now - 300 },
-                { trail: "pipeline", type: "step-1", timestamp: now - 200 },
-                { trail: "pipeline", type: "step-2", timestamp: now - 100 },
-            ];
-
-            const condition: ScentCondition = {
-                type: "pattern",
-                sequence: [
-                    { trail: "pipeline", signal_type: "step-1" },
-                    { trail: "pipeline", signal_type: "step-2" },
-                    { trail: "pipeline", signal_type: "step-3" },
-                ],
-                window_ms: 1000,
-                ordered: false,
-            };
-            const result = evaluateCondition(condition, {
-                pheromones: [],
-                now,
-                emissionHistory: history,
-            });
-            expect(result.met).toBe(true);
-        });
-
-        it("fails when sequence outside window", () => {
-            const condition: ScentCondition = {
-                type: "pattern",
-                sequence: [
-                    { trail: "pipeline", signal_type: "step-1" },
-                ],
-                window_ms: 100,
-            };
-            const result = evaluateCondition(condition, {
-                pheromones: [],
-                now,
-                emissionHistory: [
-                    { trail: "pipeline", type: "step-1", timestamp: now - 200 },
-                ],
-            });
-            expect(result.met).toBe(false);
-        });
+        expect(result.success).toBe(false);
     });
 });
 
@@ -684,26 +723,21 @@ describe("Scent Behavior", () => {
 
 describe("Garbage Collection", () => {
     it("removes evaporated pheromones", () => {
-        const bb = new Blackboard({ trackEmissionHistory: false });
+        let t = 1_000_000;
+        const bb = new Blackboard({ trackEmissionHistory: false, clock: () => t });
 
-        // Emit a fast-decaying pheromone
+        // Fast decay: 0.1 * 0.5^(80/10) ≈ 0.0004, below ttl_floor (0.01) at t+80
         bb.emit({
             trail: "gc",
             type: "temp",
             intensity: 0.1,
-            decay: { type: "linear", rate_per_ms: 0.01 },
+            decay: { type: "exponential", half_life_ms: 10 },
         });
 
         expect(bb.size).toBe(1);
 
-        // Wait for it to decay
-        const wait = (ms: number) => {
-            const start = Date.now();
-            while (Date.now() - start < ms) {
-                // busy wait
-            }
-        };
-        wait(50);
+        // Advance the injected clock past evaporation — no real time passes
+        t += 80;
 
         const removed = bb.gc();
         expect(removed).toBe(1);

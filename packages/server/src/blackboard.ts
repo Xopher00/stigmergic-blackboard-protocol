@@ -46,6 +46,7 @@ import {
   type EvaluationResult,
 } from "./conditions.js";
 import { createHash } from "crypto";
+import { Journal } from "./journal.js";
 
 export interface BlackboardOptions {
   /** Interval for scent evaluation in ms (default: 100) */
@@ -66,6 +67,15 @@ export interface BlackboardOptions {
   traceStore?: TraceStore;
 }
 
+// Clock lives off BlackboardOptions: ServerOptions extends the latter and its
+// options map is Required<Omit<...>>, which would force a clock onto every server.
+export interface BlackboardRuntimeOptions extends BlackboardOptions {
+  /** Injectable clock (epoch ms); default Date.now. Lets tests pin time. */
+  clock?: () => number;
+  /** Append-only JSONL operation journal; absent → journaling disabled. */
+  journal?: { path: string };
+}
+
 export interface TriggerHandler {
   (payload: TriggerPayload): Promise<void>;
 }
@@ -77,14 +87,27 @@ export class Blackboard {
   private triggerHandlers = new Map<string, TriggerHandler>();
   private emissionHistory: Array<{ trail: string; type: string; timestamp: number }> = [];
   private evaluationTimer: ReturnType<typeof setInterval> | null = null;
-  private startTime = Date.now();
+  private startTime: number;
   private pendingDispatches: Set<Promise<void>> = new Set();
   // Scent ids disarmed by hysteresis (§7.4); absence from the set means armed.
   private disarmedScentIds = new Set<string>();
 
-  private options: Omit<Required<BlackboardOptions>, "store" | "traceStore">;
+  private readonly clock: () => number;
+  private readonly journal: Journal | undefined;
+  // §7.1 trigger-storm skip tracking, keyed by scent id (runtime-only; not on Scent).
+  private scentRunState = new Map<string, { running: boolean; skippedFires: number }>();
 
-  constructor(options: BlackboardOptions = {}) {
+  private options: Omit<
+    Required<BlackboardRuntimeOptions>,
+    "store" | "traceStore" | "clock" | "journal"
+  >;
+
+  constructor(options: BlackboardRuntimeOptions = {}) {
+    this.clock = options.clock ?? (() => Date.now());
+    this.journal = options.journal ? new Journal(options.journal.path) : undefined;
+    // startTime can't be a field initializer: it must read this.clock, which
+    // only exists once the constructor body runs.
+    this.startTime = this.clock();
     this.store = options.store ?? new MemoryStore();
     this.traceStore = options.traceStore ?? new MemoryTraceStore();
     this.options = {
@@ -102,7 +125,19 @@ export class Blackboard {
   // ==========================================================================
 
   emit(params: EmitParams): EmitResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    try {
+      const result = this.emitOp(params);
+      this.journalLine(t0, "emit", params.trail, result.pheromone_id, params.source_agent ?? null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "emit", params.trail, null, params.source_agent ?? null, "error");
+      throw err;
+    }
+  }
+
+  private emitOp(params: EmitParams): EmitResult {
+    const now = this.clock();
     const {
       trail,
       type,
@@ -148,7 +183,7 @@ export class Blackboard {
 
       switch (merge_strategy) {
         case "reinforce":
-          existing.initial_intensity = clampedIntensity;
+          existing.initial_intensity = Math.max(previousIntensity, clampedIntensity);
           existing.last_reinforced_at = now;
           action = "reinforced";
           break;
@@ -160,12 +195,6 @@ export class Blackboard {
           existing.tags = tags;
           if (source_agent) existing.source_agent = source_agent;
           action = "replaced";
-          break;
-
-        case "max":
-          existing.initial_intensity = Math.max(previousIntensity, clampedIntensity);
-          existing.last_reinforced_at = now;
-          action = "merged";
           break;
 
         case "add":
@@ -218,7 +247,20 @@ export class Blackboard {
   // ==========================================================================
 
   sniff(params: SniffParams = {}): SniffResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    const trail = params.trails?.join(",") ?? null;
+    try {
+      const result = this.sniffOp(params);
+      this.journalLine(t0, "sniff", trail, null, null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "sniff", trail, null, null, "error");
+      throw err;
+    }
+  }
+
+  private sniffOp(params: SniffParams = {}): SniffResult {
+    const now = this.clock();
     const {
       trails,
       types,
@@ -290,6 +332,18 @@ export class Blackboard {
   // ==========================================================================
 
   registerScent(params: RegisterScentParams): RegisterScentResult {
+    const t0 = this.clock();
+    try {
+      const result = this.registerScentOp(params);
+      this.journalLine(t0, "registerScent", null, params.scent_id, null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "registerScent", null, params.scent_id, null, "error");
+      throw err;
+    }
+  }
+
+  private registerScentOp(params: RegisterScentParams): RegisterScentResult {
     const {
       scent_id,
       agent_endpoint,
@@ -322,7 +376,7 @@ export class Blackboard {
     this.disarmedScentIds.delete(scent_id); // re-registration re-arms
 
     // Evaluate current state
-    const now = Date.now();
+    const now = this.clock();
     const evalResult = evaluateCondition(condition, {
       pheromones: [...this.store.values()],
       now,
@@ -344,6 +398,25 @@ export class Blackboard {
   // ==========================================================================
 
   deregisterScent(params: DeregisterScentParams): DeregisterScentResult {
+    const t0 = this.clock();
+    try {
+      const result = this.deregisterScentOp(params);
+      this.journalLine(
+        t0,
+        "deregisterScent",
+        null,
+        params.scent_id,
+        null,
+        result.status === "not_found" ? "not_found" : "ok"
+      );
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "deregisterScent", null, params.scent_id, null, "error");
+      throw err;
+    }
+  }
+
+  private deregisterScentOp(params: DeregisterScentParams): DeregisterScentResult {
     const { scent_id } = params;
 
     if (this.scents.has(scent_id)) {
@@ -361,7 +434,20 @@ export class Blackboard {
   // ==========================================================================
 
   evaporate(params: EvaporateParams = {}): EvaporateResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    const trail = params.trail ?? null;
+    try {
+      const result = this.evaporateOp(params);
+      this.journalLine(t0, "evaporate", trail, null, null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "evaporate", trail, null, null, "error");
+      throw err;
+    }
+  }
+
+  private evaporateOp(params: EvaporateParams = {}): EvaporateResult {
+    const now = this.clock();
     const { trail, types, older_than_ms, below_intensity, tags } = params;
 
     const toRemove: string[] = [];
@@ -393,7 +479,19 @@ export class Blackboard {
   // ==========================================================================
 
   inspect(params: InspectParams = {}): InspectResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    try {
+      const result = this.inspectOp(params);
+      this.journalLine(t0, "inspect", null, null, null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "inspect", null, null, null, "error");
+      throw err;
+    }
+  }
+
+  private inspectOp(params: InspectParams = {}): InspectResult {
+    const now = this.clock();
     const include = params.include ?? ["trails", "scents", "stats"];
     const result: InspectResult = { timestamp: now };
 
@@ -515,7 +613,7 @@ export class Blackboard {
    * Evaluate all scents and trigger as needed
    */
   async evaluateScents(): Promise<void> {
-    const now = Date.now();
+    const now = this.clock();
     const pheromones = [...this.store.values()];
 
     for (const scent of this.scents.values()) {
@@ -546,8 +644,26 @@ export class Blackboard {
         this.disarmedScentIds.delete(scent.scent_id);
       }
 
-      const shouldTrigger = this.shouldTrigger(scent, evalResult);
+      let shouldTrigger = this.shouldTrigger(scent, evalResult);
       scent.last_condition_met = evalResult.met;
+
+      // §7.1: while an activation is in flight, further qualifying evaluations
+      // are skipped — counted, not dispatched, and journaled as their own line.
+      const runState = this.scentRunState.get(scent.scent_id);
+      if (shouldTrigger && runState?.running) {
+        runState.skippedFires += 1;
+        this.journalLine(
+          this.clock(),
+          "trigger",
+          null,
+          scent.scent_id,
+          null,
+          "ok",
+          `${scent.scent_id}@${scent.last_triggered_at ?? now}`,
+          runState.skippedFires,
+        );
+        shouldTrigger = false;
+      }
 
       if (shouldTrigger) {
         scent.last_triggered_at = now;
@@ -556,8 +672,17 @@ export class Blackboard {
         }
         // Fire-and-forget: a slow/blocked handler for this scent must not
         // delay trigger delivery to other scents in this loop (SPECIFICATION.md §7.1).
+        const t0 = this.clock();
+        const activationId = `${scent.scent_id}@${now}`;
+        const state = runState ?? { running: false, skippedFires: 0 };
+        if (!runState) this.scentRunState.set(scent.scent_id, state);
+        state.running = true;
         const dispatchPromise = this.dispatchTrigger(scent, evalResult, now).finally(() => {
           this.pendingDispatches.delete(dispatchPromise);
+          state.running = false;
+          const skipped = state.skippedFires;
+          state.skippedFires = 0;
+          this.journalLine(t0, "trigger", null, scent.scent_id, null, "ok", activationId, skipped);
         });
         this.pendingDispatches.add(dispatchPromise);
       }
@@ -673,7 +798,7 @@ export class Blackboard {
    * Garbage collect evaporated pheromones
    */
   gc(): number {
-    const now = Date.now();
+    const now = this.clock();
     const toRemove: string[] = [];
 
     for (const [id, p] of this.store.entries()) {
@@ -726,6 +851,30 @@ export class Blackboard {
     this.emissionHistory = this.emissionHistory.filter((e) => e.timestamp >= cutoff);
   }
 
+  private journalLine(
+    t0: number,
+    op: string,
+    trail: string | null,
+    targetId: string | null,
+    agent: string | null,
+    outcome: "ok" | "not_found" | "error",
+    activationId: string | null = null,
+    skippedFires: number | null = null,
+  ): void {
+    if (!this.journal) return;
+    this.journal.append({
+      ts: t0,
+      agent,
+      op,
+      trail,
+      targetId,
+      outcome,
+      latencyMs: this.clock() - t0,
+      activationId,
+      skippedFires,
+    });
+  }
+
   // ==========================================================================
   // TRACE OPERATIONS — Durable Knowledge Layer
   // ==========================================================================
@@ -735,7 +884,19 @@ export class Blackboard {
    * Matching by trail + key. If exists, bumps version.
    */
   inscribe(params: InscribeParams): InscribeResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    try {
+      const result = this.inscribeOp(params);
+      this.journalLine(t0, "inscribe", params.trail, params.key, params.source_agent ?? null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "inscribe", params.trail, params.key, params.source_agent ?? null, "error");
+      throw err;
+    }
+  }
+
+  private inscribeOp(params: InscribeParams): InscribeResult {
+    const now = this.clock();
     const { trail, key, value, tags = [], source_agent } = params;
 
     // Size check
@@ -790,7 +951,32 @@ export class Blackboard {
    * Read traces from the blackboard.
    */
   read(params: ReadParams = {}): ReadResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    const trail = params.trails?.join(",") ?? null;
+    const targetId = params.keys?.length
+      ? params.keys.join(",")
+      : params.prefix
+        ? `${params.prefix}*`
+        : null;
+    try {
+      const result = this.readOp(params);
+      this.journalLine(
+        t0,
+        "read",
+        trail,
+        targetId,
+        null,
+        result.traces.length === 0 ? "not_found" : "ok"
+      );
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "read", trail, targetId, null, "error");
+      throw err;
+    }
+  }
+
+  private readOp(params: ReadParams = {}): ReadResult {
+    const now = this.clock();
     const { trails, keys, tags, prefix, limit = 100 } = params;
 
     const results: Trace[] = [];
@@ -824,7 +1010,21 @@ export class Blackboard {
    * Erase traces matching criteria.
    */
   erase(params: EraseParams = {}): EraseResult {
-    const now = Date.now();
+    const t0 = this.clock();
+    const trail = params.trail ?? null;
+    const targetId = params.keys?.join(",") ?? null;
+    try {
+      const result = this.eraseOp(params);
+      this.journalLine(t0, "erase", trail, targetId, null, "ok");
+      return result;
+    } catch (err) {
+      this.journalLine(t0, "erase", trail, targetId, null, "error");
+      throw err;
+    }
+  }
+
+  private eraseOp(params: EraseParams = {}): EraseResult {
+    const now = this.clock();
     const { trail, keys, tags, older_than_ms } = params;
 
     const toRemove: string[] = [];

@@ -6,6 +6,7 @@ import asyncio
 import uuid
 import hashlib
 import json
+import os
 from typing import Dict, List, Optional, Any, Callable, Awaitable, Set
 
 from sbp.types import (
@@ -24,14 +25,22 @@ from sbp.types import (
 )
 from sbp.decay import compute_intensity, is_evaporated
 from sbp.evaluator import evaluate_condition, EvaluationContext, match_tags, should_rearm
+from sbp.journal import Journal
+from sbp.rate_limiter import RateLimiter
 
 class LocalBlackboard:
-    def __init__(self):
+    def __init__(
+        self,
+        journal_path: str | os.PathLike[str] | None = None,
+        max_pheromones: int | None = None,
+        rate_limit_max_requests: int | None = None,
+        rate_limit_window_ms: int = 60_000,
+    ):
         self.pheromones: Dict[str, Pheromone] = {}
         self.scents: Dict[str, Any] = {} # Storing internal scent dicts
         self.handlers: Dict[str, Callable[[TriggerPayload], Awaitable[None]]] = {}
         self.emission_history: List[Dict[str, Any]] = []
-        self.start_time = int(time.time() * 1000)
+        self.start_time = self._now()
 
         # Trace storage: composite key "trail\0key" -> Trace
         self.traces: Dict[str, Trace] = {}
@@ -48,6 +57,14 @@ class LocalBlackboard:
 
         # Ownership prefixes whose scents refuse mutation and skip evaluation/dispatch
         self._frozen_prefixes: Set[str] = set()
+
+        self._journal: Journal | None = Journal(str(journal_path)) if journal_path else None
+        self._max_pheromones = max_pheromones
+        self._rate_limiter = (
+            RateLimiter(rate_limit_max_requests, rate_limit_window_ms)
+            if rate_limit_max_requests is not None
+            else None
+        )
 
     def _trace_key(self, trail: str, key: str) -> str:
         return f"{trail}\0{key}"
@@ -80,11 +97,49 @@ class LocalBlackboard:
     def _now(self) -> int:
         return int(time.time() * 1000)
 
+    def _check_rate_limit(self, agent_id: str | None) -> None:
+        # One shared bucket per agent across all agent-keyed ops; calls without
+        # an agent identifier are never limited.
+        if self._rate_limiter and agent_id:
+            self._rate_limiter.check(agent_id, self._now())
+
+    def _journal_line(
+        self,
+        t0: int,
+        op: str,
+        trail: str | None,
+        target_id: str | None,
+        agent: str | None,
+        outcome: str,
+        activation_id: str | None = None,
+        skipped_fires: int | None = None,
+    ) -> None:
+        if not self._journal:
+            return
+        self._journal.append({
+            "ts": t0, "agent": agent, "op": op, "trail": trail, "targetId": target_id,
+            "outcome": outcome, "latencyMs": self._now() - t0,
+            "activationId": activation_id, "skippedFires": skipped_fires,
+        })
+
     def _hash_payload(self, payload: Dict[str, Any]) -> str:
         content = json.dumps(payload, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def emit(self, params: EmitParams) -> EmitResult:
+        self._check_rate_limit(params.source_agent)
+        t0 = self._now()
+        try:
+            result = self._emit(params)
+        except Exception:
+            self._journal_line(t0, "emit", params.trail, None, params.source_agent, "error")
+            raise
+        self._journal_line(
+            t0, "emit", params.trail, result.pheromone_id, params.source_agent, "ok"
+        )
+        return result
+
+    def _emit(self, params: EmitParams) -> EmitResult:
         now = self._now()
 
         # Record history
@@ -115,7 +170,7 @@ class LocalBlackboard:
             action = "reinforced"
 
             if params.merge_strategy == "reinforce":
-                existing.initial_intensity = clamped_intensity
+                existing.initial_intensity = max(prev_intensity, clamped_intensity)
                 existing.last_reinforced_at = now
             elif params.merge_strategy == "replace":
                 existing.initial_intensity = clamped_intensity
@@ -123,10 +178,6 @@ class LocalBlackboard:
                 existing.payload = params.payload
                 existing.tags = params.tags
                 action = "replaced"
-            elif params.merge_strategy == "max":
-                existing.initial_intensity = max(prev_intensity, clamped_intensity)
-                existing.last_reinforced_at = now
-                action = "merged"
             elif params.merge_strategy == "add":
                 existing.initial_intensity = min(1.0, prev_intensity + clamped_intensity)
                 existing.last_reinforced_at = now
@@ -156,6 +207,11 @@ class LocalBlackboard:
         )
         self.pheromones[pid] = pheromone
 
+        # Checked after insertion so a store already at the limit is swept by the
+        # next emit; `>` (not `>=`) matches the TS reference's emit-time GC.
+        if self._max_pheromones is not None and len(self.pheromones) > self._max_pheromones:
+            self.gc()
+
         return EmitResult(
             pheromone_id=pid,
             action="created",
@@ -163,6 +219,17 @@ class LocalBlackboard:
         )
 
     def sniff(self, params: SniffParams) -> SniffResult:
+        t0 = self._now()
+        trail = ",".join(params.trails) if params.trails else None
+        try:
+            result = self._sniff(params)
+        except Exception:
+            self._journal_line(t0, "sniff", trail, None, None, "error")
+            raise
+        self._journal_line(t0, "sniff", trail, None, None, "ok")
+        return result
+
+    def _sniff(self, params: SniffParams) -> SniffResult:
         now = self._now()
         results = []
         aggs: Dict[str, AggregateStats] = {}
@@ -214,6 +281,19 @@ class LocalBlackboard:
     def register_scent(
         self, params: RegisterScentParams, agent_id: str | None = None
     ) -> RegisterScentResult:
+        self._check_rate_limit(agent_id)
+        t0 = self._now()
+        try:
+            result = self._register_scent(params, agent_id)
+        except Exception:
+            self._journal_line(t0, "register_scent", None, params.scent_id, agent_id, "error")
+            raise
+        self._journal_line(t0, "register_scent", None, result.scent_id, agent_id, "ok")
+        return result
+
+    def _register_scent(
+        self, params: RegisterScentParams, agent_id: str | None = None
+    ) -> RegisterScentResult:
         resolved = self._resolve_scent_id(params.scent_id, agent_id)
         if self._scent_frozen(resolved):
             raise PermissionError("refused register_scent: prefix is frozen")
@@ -259,6 +339,20 @@ class LocalBlackboard:
         )
 
     def deregister_scent(
+        self, scent_id: str, agent_id: str | None = None
+    ) -> DeregisterScentResult:
+        self._check_rate_limit(agent_id)
+        t0 = self._now()
+        try:
+            result = self._deregister_scent(scent_id, agent_id)
+        except Exception:
+            self._journal_line(t0, "deregister_scent", None, scent_id, agent_id, "error")
+            raise
+        outcome = "ok" if result.status == "deregistered" else "not_found"
+        self._journal_line(t0, "deregister_scent", None, result.scent_id, agent_id, outcome)
+        return result
+
+    def _deregister_scent(
         self, scent_id: str, agent_id: str | None = None
     ) -> DeregisterScentResult:
         resolved = self._resolve_scent_id(scent_id, agent_id)
@@ -408,11 +502,14 @@ class LocalBlackboard:
                 task.add_done_callback(self._dispatch_tasks.discard)
 
     async def _dispatch_trigger(self, scent: Dict[str, Any], result, now: int):
+        t0 = self._now()
+        dispatch_started = False  # frozen scents return early and get no trigger line
         try:
             # Silent skip, never a raise — a dispatch in flight when a freeze lands
             # must still clear `running` via the finally below.
             if self._scent_frozen(scent["id"]):
                 return
+            dispatch_started = True
 
             context = []
             matching_ids = set(result.matching_pheromone_ids)
@@ -462,6 +559,12 @@ class LocalBlackboard:
         finally:
             scent["running"] = False
             skipped = scent.get("skipped_fires", 0)
+            if dispatch_started:
+                activation_id = f"{scent['id']}@{now}"
+                self._journal_line(
+                    t0, "trigger", None, scent["id"], None, "ok",
+                    activation_id=activation_id, skipped_fires=skipped,
+                )
             if skipped > 0:
                 print(
                     f"[SBP Local] Scent {scent['id']}: {skipped} fires were skipped "
@@ -491,6 +594,26 @@ class LocalBlackboard:
 
     def inscribe(self, params: dict | InscribeParams) -> InscribeResult:
         """Inscribe a trace — create or update a durable knowledge record."""
+        trail, key, agent = self._inscribe_fields(params)
+        self._check_rate_limit(agent)
+        t0 = self._now()
+        try:
+            result = self._inscribe(params)
+        except Exception:
+            self._journal_line(t0, "inscribe", trail, key, agent, "error")
+            raise
+        self._journal_line(t0, "inscribe", trail, key, agent, "ok")
+        return result
+
+    @staticmethod
+    def _inscribe_fields(
+        params: dict[str, Any] | InscribeParams,
+    ) -> tuple[Any, Any, Any]:
+        if isinstance(params, dict):
+            return params.get("trail"), params.get("key"), params.get("source_agent")
+        return params.trail, params.key, params.source_agent
+
+    def _inscribe(self, params: dict | InscribeParams) -> InscribeResult:
         now = self._now()
 
         # Accept both dict and InscribeParams
@@ -553,6 +676,24 @@ class LocalBlackboard:
 
     def read(self, params: ReadParams) -> ReadResult:
         """Read traces from the blackboard."""
+        t0 = self._now()
+        trail = ",".join(params.trails) if params.trails else None
+        if params.keys:
+            target = ",".join(params.keys)
+        elif params.prefix:
+            target = f"{params.prefix}*"
+        else:
+            target = None
+        try:
+            result = self._read(params)
+        except Exception:
+            self._journal_line(t0, "read", trail, target, None, "error")
+            raise
+        outcome = "ok" if result.traces else "not_found"
+        self._journal_line(t0, "read", trail, target, None, outcome)
+        return result
+
+    def _read(self, params: ReadParams) -> ReadResult:
         now = self._now()
         results: List[Trace] = []
 
@@ -576,6 +717,17 @@ class LocalBlackboard:
 
     def erase(self, params: EraseParams) -> EraseResult:
         """Erase traces matching criteria."""
+        t0 = self._now()
+        target = ",".join(params.keys) if params.keys else None
+        try:
+            result = self._erase(params)
+        except Exception:
+            self._journal_line(t0, "erase", params.trail, target, None, "error")
+            raise
+        self._journal_line(t0, "erase", params.trail, target, None, "ok")
+        return result
+
+    def _erase(self, params: EraseParams) -> EraseResult:
         now = self._now()
         to_remove: List[str] = []
         trails_affected: set[str] = set()
@@ -603,6 +755,16 @@ class LocalBlackboard:
 
     def evaporate(self, params: EvaporateParams) -> EvaporateResult:
         """Force evaporation of pheromones matching criteria."""
+        t0 = self._now()
+        try:
+            result = self._evaporate(params)
+        except Exception:
+            self._journal_line(t0, "evaporate", params.trail, None, None, "error")
+            raise
+        self._journal_line(t0, "evaporate", params.trail, None, None, "ok")
+        return result
+
+    def _evaporate(self, params: EvaporateParams) -> EvaporateResult:
         now = self._now()
         to_remove: List[str] = []
         trails_affected: set[str] = set()
@@ -629,8 +791,26 @@ class LocalBlackboard:
             trails_affected=list(trails_affected),
         )
 
+    def gc(self) -> int:
+        """Delete evaporated pheromones from the in-memory store. Returns the count removed."""
+        now = self._now()
+        expired = [pid for pid, p in self.pheromones.items() if is_evaporated(p, now)]
+        for pid in expired:
+            del self.pheromones[pid]
+        return len(expired)
+
     def inspect(self, params: InspectParams) -> InspectResult:
         """Inspect blackboard state."""
+        t0 = self._now()
+        try:
+            result = self._inspect(params)
+        except Exception:
+            self._journal_line(t0, "inspect", None, None, None, "error")
+            raise
+        self._journal_line(t0, "inspect", None, None, None, "ok")
+        return result
+
+    def _inspect(self, params: InspectParams) -> InspectResult:
         now = self._now()
         include = params.include or ["trails", "scents", "stats"]
         result = InspectResult(timestamp=now)

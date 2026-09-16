@@ -7,7 +7,6 @@ from sbp.types import (
     ScentCondition,
     ThresholdCondition,
     CompositeCondition,
-    RateCondition,
     TraceCondition,
     Trace,
     TagFilter
@@ -39,8 +38,6 @@ def evaluate_condition(condition: ScentCondition, ctx: EvaluationContext) -> Eva
         return evaluate_threshold(condition, ctx) # type: ignore
     elif condition.type == "composite":
         return evaluate_composite(condition, ctx) # type: ignore
-    elif condition.type == "rate":
-        return evaluate_rate(condition, ctx) # type: ignore
     elif condition.type == "trace":
         return evaluate_trace(condition, ctx) # type: ignore
 
@@ -94,7 +91,7 @@ def should_rearm(
     observation of the opposite condition state.
     """
     rising = trigger_mode == "edge_rising"
-    if condition.type == "threshold" or condition.type == "rate":
+    if condition.type == "threshold":
         if condition.operator in (">=", ">"):
             return value <= condition.value - hysteresis if rising else value >= condition.value + hysteresis
         if condition.operator in ("<=", "<"):
@@ -156,27 +153,6 @@ def evaluate_composite(condition: CompositeCondition, ctx: EvaluationContext) ->
     value = float(len([r for r in results if r.met]))
 
     return EvaluationResult(met, value, list(all_ids))
-
-def evaluate_rate(condition: RateCondition, ctx: EvaluationContext) -> EvaluationResult:
-    window_start = ctx.now - condition.window_ms
-
-    relevant_emissions = [
-        e for e in ctx.emission_history
-        if e["trail"] == condition.trail and
-           (condition.signal_type == "*" or e["type"] == condition.signal_type) and
-           e["timestamp"] >= window_start
-    ]
-
-    value = 0.0
-    if condition.metric == "emissions_per_second":
-        window_seconds = condition.window_ms / 1000.0
-        if window_seconds > 0:
-            value = len(relevant_emissions) / window_seconds
-    else:
-        value = float(len(relevant_emissions))
-
-    met = compare(value, condition.operator, condition.value)
-    return EvaluationResult(met, value, [])
 
 
 # ============================================================================

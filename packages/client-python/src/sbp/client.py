@@ -13,6 +13,7 @@ import httpx
 
 from sbp.types import (
     DecayModel,
+    MergeStrategy,
     EmitResult,
     TagFilter,
     SniffParams,
@@ -206,7 +207,7 @@ class AsyncSbpClient:
         decay: DecayModel | None = None,
         payload: dict[str, Any] | None = None,
         tags: list[str] | None = None,
-        merge_strategy: str = "reinforce",
+        merge_strategy: MergeStrategy = "reinforce",
     ) -> EmitResult:
         """Emit a pheromone to the blackboard"""
         params: dict[str, Any] = {
@@ -548,7 +549,7 @@ class SbpClient:
         decay: DecayModel | None = None,
         payload: dict[str, Any] | None = None,
         tags: list[str] | None = None,
-        merge_strategy: str = "reinforce",
+        merge_strategy: MergeStrategy = "reinforce",
     ) -> EmitResult:
         return self._run(
             self._async_client.emit(

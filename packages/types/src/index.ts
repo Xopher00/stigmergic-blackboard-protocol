@@ -90,28 +90,7 @@ export interface CompositeCondition {
     conditions: ScentCondition[];
 }
 
-export interface RateCondition {
-    type: "rate";
-    trail: string;
-    signal_type: string;
-    metric: "emissions_per_second" | "intensity_delta";
-    window_ms: number;
-    operator: ">=" | ">" | "<=" | "<";
-    value: number;
-}
-
-export interface PatternCondition {
-    type: "pattern";
-    sequence: Array<{
-        trail: string;
-        signal_type: string;
-        min_intensity?: number;
-    }>;
-    window_ms: number;
-    ordered?: boolean;
-}
-
-export type ScentCondition = ThresholdCondition | CompositeCondition | RateCondition | PatternCondition | TraceCondition;
+export type ScentCondition = ThresholdCondition | CompositeCondition | TraceCondition;
 
 export interface TraceCondition {
     type: "trace";
@@ -126,7 +105,7 @@ export interface TraceCondition {
 // MERGE STRATEGIES & TRIGGER MODES
 // ============================================================================
 
-export type MergeStrategy = "reinforce" | "replace" | "max" | "add" | "new";
+export type MergeStrategy = "reinforce" | "replace" | "add" | "new";
 export type TriggerMode = "level" | "edge_rising" | "edge_falling";
 
 // ============================================================================

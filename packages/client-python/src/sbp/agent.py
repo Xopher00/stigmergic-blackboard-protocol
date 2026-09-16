@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Generator
 from dataclasses import dataclass, field
 
 from sbp.client import AsyncSbpClient
 from sbp.types import (
     ScentCondition,
+    MergeStrategy,
     ThresholdCondition,
     CompositeCondition,
     TraceCondition,
@@ -41,6 +42,16 @@ class ScentRegistration:
     cooldown_ms: int = 1000
     activation_payload: dict[str, Any] = field(default_factory=dict)
     context_trails: list[str] | None = None
+
+
+class _StopHandle:
+    """Awaitable returned by SbpAgent.stop(); awaits into the agent's cleanup."""
+
+    def __init__(self, agent: SbpAgent) -> None:
+        self._agent = agent
+
+    def __await__(self) -> Generator[Any, Any, None]:
+        return self._agent._cleanup().__await__()
 
 
 class SbpAgent:
@@ -85,6 +96,8 @@ class SbpAgent:
         self._scents: list[ScentRegistration] = []
         self._dynamic_scent_ids: set[str] = set()
         self._running = False
+        self._cleaned_up = False
+        self._started = False
 
     def on_scent(
         self,
@@ -180,7 +193,7 @@ class SbpAgent:
         decay: DecayModel | None = None,
         payload: dict[str, Any] | None = None,
         tags: list[str] | None = None,
-        merge_strategy: str = "reinforce",
+        merge_strategy: MergeStrategy = "reinforce",
     ) -> EmitResult:
         """Emit a pheromone from this agent"""
         if not self._client:
@@ -335,29 +348,37 @@ class SbpAgent:
 
         await self._client.unsubscribe(scent_id)
 
-    async def run(self) -> None:
-        """Run the agent, registering all scents and listening for triggers"""
+    async def start(self) -> None:
+        """Connect and register/subscribe every staged scent, returning only once
+        registration is complete — without entering run()'s idle loop. Idempotent:
+        on an already-started agent it is a no-op, so run() can call it defensively."""
+        if self._started:
+            return
+        self._started = True
+
         self._client = AsyncSbpClient(self.server_url, agent_id=self.agent_id, local=self.local)
         await self._client.connect()
 
         self._running = True
         print(f"[SBP Agent] {self.agent_id} starting (local={self.local})...")
 
-        try:
-            # Register all scents
-            for scent in self._scents:
-                await self._client.register_scent(
-                    scent.scent_id,
-                    scent.condition,
-                    cooldown_ms=scent.cooldown_ms,
-                    activation_payload=scent.activation_payload,
-                    context_trails=scent.context_trails,
-                )
-                # Subscribe to WebSocket triggers
-                await self._client.subscribe(scent.scent_id, scent.handler)
-                print(f"[SBP Agent] Registered scent: {scent.scent_id}")
+        for scent in self._scents:
+            await self._client.register_scent(
+                scent.scent_id,
+                scent.condition,
+                cooldown_ms=scent.cooldown_ms,
+                activation_payload=scent.activation_payload,
+                context_trails=scent.context_trails,
+            )
+            await self._client.subscribe(scent.scent_id, scent.handler)
+            print(f"[SBP Agent] Registered scent: {scent.scent_id}")
 
-            print(f"[SBP Agent] {self.agent_id} running with {len(self._scents)} scents")
+        print(f"[SBP Agent] {self.agent_id} running with {len(self._scents)} scents")
+
+    async def run(self) -> None:
+        """Run the agent, registering all scents and listening for triggers"""
+        try:
+            await self.start()
 
             # Keep running until stopped
             while self._running:
@@ -366,19 +387,39 @@ class SbpAgent:
         except asyncio.CancelledError:
             pass
         finally:
-            # Cleanup
-            staged_ids = {s.scent_id for s in self._scents}
-            for scent_id in staged_ids | self._dynamic_scent_ids:
-                await self._client.unsubscribe(scent_id)
-                await self._client.deregister_scent(scent_id)
-            self._dynamic_scent_ids.clear()
+            await self._cleanup()
 
-            await self._client.close()
-            print(f"[SBP Agent] {self.agent_id} stopped")
+    async def _cleanup(self) -> None:
+        """Deregister/unsubscribe every scent this agent registered and close the
+        client. Shared by stop() and run()'s finally and guarded by a flag set
+        before the first await, so whichever fires first does the teardown and
+        the other becomes a no-op."""
+        if not self._started or self._cleaned_up or self._client is None:
+            return
+        self._cleaned_up = True
 
-    def stop(self) -> None:
-        """Stop the agent"""
+        staged_ids = {s.scent_id for s in self._scents}
+        for scent_id in staged_ids | self._dynamic_scent_ids:
+            await self._client.unsubscribe(scent_id)
+            await self._client.deregister_scent(scent_id)
+        self._dynamic_scent_ids.clear()
+
+        await self._client.close()
+
+        # _client stays set (closed) so post-stop accessors keep working.
+        self._started = False
+        self._cleaned_up = False
         self._running = False
+        print(f"[SBP Agent] {self.agent_id} stopped")
+
+    def stop(self) -> Awaitable[None]:
+        """Stop the agent. The flag flip happens synchronously, so a bare call from
+        sync code (SbpWorker.stop, signal handlers) still halts run(), whose finally
+        then performs cleanup. Awaiting the returned handle runs that cleanup
+        immediately — the only way teardown can happen after a bare start(), where
+        no run() finally will ever fire."""
+        self._running = False
+        return _StopHandle(self)
 
     async def run_until_complete(self, timeout: float | None = None) -> None:
         """Run the agent with optional timeout"""
@@ -388,7 +429,7 @@ class SbpAgent:
             else:
                 await self.run()
         except asyncio.TimeoutError:
-            self.stop()
+            await self.stop()
 
 
 def run_agent(agent: SbpAgent) -> None:
@@ -408,6 +449,7 @@ def run_agent(agent: SbpAgent) -> None:
     asyncio.set_event_loop(loop)
 
     def shutdown() -> None:
+        # Safe un-awaited from a sync handler: stop() takes effect synchronously.
         agent.stop()
 
     loop.add_signal_handler(signal.SIGINT, shutdown)

@@ -54,9 +54,11 @@ async def main() -> None:
     async def _on_tweet(trigger) -> None:
         done.set()
 
+    for agent in (researcher.sbp_agent, writer.sbp_agent, observer):
+        await agent.start()
+
     worker_tasks = [asyncio.create_task(w.run()) for w in (researcher, writer)]
     observer_task = asyncio.create_task(observer.run())
-    await asyncio.sleep(1)  # let scent registration land before the bootstrap emit
 
     bootstrap = AsyncSbpClient(local=True, agent_id="bootstrap")
     await bootstrap.connect()
@@ -80,7 +82,7 @@ async def main() -> None:
         await bootstrap.close()
         for w in (researcher, writer):
             w.stop()
-        observer.stop()
+        await observer.stop()
         for t in worker_tasks:
             await t
         await observer_task

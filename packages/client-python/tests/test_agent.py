@@ -287,3 +287,116 @@ class TestFreezeEndToEnd:
             await asyncio.wait_for(task_ctrl, timeout=5)
 
         assert len(fired_fz) > fz_before
+
+
+class TestAgentReadySignal:
+    @pytest.mark.asyncio
+    async def test_start_returns_with_all_staged_scents_registered_and_subscribed(self):
+        bb = get_shared_blackboard()
+        agent = SbpAgent("ready-a", local=True)
+
+        @agent.when("t1", "e", value=0.5, cooldown_ms=0)
+        async def h1(trigger):
+            pass
+
+        @agent.when("t2", "e", value=0.5, cooldown_ms=0)
+        async def h2(trigger):
+            pass
+
+        await agent.start()
+
+        assert "ready-a:t1/e" in bb.scents
+        assert "ready-a:t2/e" in bb.scents
+        assert bb.handlers["ready-a:t1/e"] is h1
+        assert bb.handlers["ready-a:t2/e"] is h2
+
+        await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_registration_complete_without_any_sleep(self):
+        bb = get_shared_blackboard()
+        agent = SbpAgent("ready-b", local=True)
+
+        @agent.when("t1", "e", value=0.5, cooldown_ms=0)
+        async def h1(trigger):
+            pass
+
+        @agent.when("t2", "e", value=0.5, cooldown_ms=0)
+        async def h2(trigger):
+            pass
+
+        await agent.start()
+
+        # no await between start() returning and these asserts: if registration were
+        # deferred to a task or loop tick they fail deterministically instead of flaking
+        assert {k for k in bb.scents if k.startswith("ready-b:")} == {"ready-b:t1/e", "ready-b:t2/e"}
+        assert {k for k in bb.handlers if k.startswith("ready-b:")} == {"ready-b:t1/e", "ready-b:t2/e"}
+
+        await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_run_still_self_registers_when_timed_out(self):
+        bb = get_shared_blackboard()
+        agent = SbpAgent("compat-c", local=True)
+
+        @agent.when("t1", "e", value=0.5, cooldown_ms=0)
+        async def h1(trigger):
+            pass
+
+        @agent.when("t2", "e", value=0.5, cooldown_ms=0)
+        async def h2(trigger):
+            pass
+
+        # wait_for cancels run(), whose finally deregisters everything before
+        # TimeoutError propagates -- so registration must be snapshotted mid-run
+        snapshot = {}
+
+        async def grab():
+            loop = asyncio.get_running_loop()
+            ids = {"compat-c:t1/e", "compat-c:t2/e"}
+            deadline = loop.time() + 0.15
+            while loop.time() < deadline and not ids <= bb.scents.keys():
+                await asyncio.sleep(0.02)
+            snapshot["scents"] = {k for k in bb.scents if k.startswith("compat-c:")}
+            snapshot["handlers"] = {k for k in bb.handlers if k.startswith("compat-c:")}
+
+        grabber = asyncio.create_task(grab())
+        try:
+            await asyncio.wait_for(agent.run(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+        await grabber
+
+        assert snapshot["scents"] == {"compat-c:t1/e", "compat-c:t2/e"}
+        assert snapshot["handlers"] == {"compat-c:t1/e", "compat-c:t2/e"}
+
+    @pytest.mark.asyncio
+    async def test_stop_after_bare_start_cleans_up_staged_scents(self):
+        bb = get_shared_blackboard()
+        agent = SbpAgent("clean-d", local=True)
+        fired = []
+
+        @agent.when("t", "e", value=0.5, cooldown_ms=0)
+        async def handler(trigger):
+            fired.append(trigger)
+
+        await agent.start()
+        assert "clean-d:t/e" in bb.scents
+        assert "clean-d:t/e" in bb.handlers
+
+        await agent.stop()
+
+        assert "clean-d:t/e" not in bb.scents
+        assert "clean-d:t/e" not in bb.handlers
+
+        # The shared loop must be alive here or "never fires" passes vacuously even on
+        # broken code -- a stopped evaluation loop silences zombie handlers too.
+        observer = AsyncSbpClient("http://localhost:3000", agent_id="observer", local=True)
+        await observer.connect()
+        try:
+            await observer.emit("t", "e", 0.9)
+            await asyncio.sleep(0.5)
+        finally:
+            await observer.close()
+
+        assert fired == []

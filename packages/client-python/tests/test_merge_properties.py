@@ -6,11 +6,12 @@ trail/type/payload so they merge, per SPECIFICATION.md 5.1: "Pheromones MUST
 match if trail + type + payload_hash are identical") and checks the invariants
 each merge strategy promises, rather than the fixed examples in test_blackboard.py.
 """
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from sbp.blackboard import LocalBlackboard
-from sbp.types import EmitParams
+from sbp.types import EmitParams, ExponentialDecay
 
 FROZEN_NOW = 1_700_000_000_000
 
@@ -26,38 +27,52 @@ def _frozen_blackboard() -> LocalBlackboard:
     return bb
 
 
-def _emit(bb, intensity, merge_strategy):
+def _emit(bb, intensity, merge_strategy, decay=None):
     return bb.emit(
         EmitParams(
             trail="t",
             type="e",
             intensity=intensity,
+            decay=decay,
             payload={"k": "v"},
             merge_strategy=merge_strategy,
         )
     )
 
 
-# --- max: result is never less than the intensity right before the merge ---
+# --- reinforce: tracks the running max, never decreases ---
 
 
 @given(first=merge_intensities, second=merge_intensities)
-def test_max_never_decreases_intensity(first, second):
+def test_reinforce_never_decreases_intensity(first, second):
     bb = _frozen_blackboard()
-    before = _emit(bb, first, "max")
-    after = _emit(bb, second, "max")
+    before = _emit(bb, first, "reinforce")
+    after = _emit(bb, second, "reinforce")
     assert after.new_intensity >= before.new_intensity
     assert after.new_intensity == max(first, second)
 
 
 @given(intensities_seq=st.lists(merge_intensities, min_size=1, max_size=8))
-def test_max_over_sequence_equals_running_max(intensities_seq):
+def test_reinforce_over_sequence_equals_running_max(intensities_seq):
     bb = _frozen_blackboard()
     running_max = -1.0
     for i in intensities_seq:
-        result = _emit(bb, i, "max")
+        result = _emit(bb, i, "reinforce")
         running_max = max(running_max, i)
         assert result.new_intensity == running_max
+
+
+# --- reinforce: floors at the decayed current intensity, not the stored initial ---
+
+
+def test_reinforce_floors_at_decayed_current_intensity():
+    bb = _frozen_blackboard()
+    first = _emit(bb, 0.9, "reinforce", decay=ExponentialDecay(half_life_ms=10000))
+    pheromone = bb.pheromones[first.pheromone_id]
+    pheromone.last_reinforced_at = FROZEN_NOW - 7400  # 0.9 * 0.5^0.74 ≈ 0.53 current now
+    after = _emit(bb, 0.3, "reinforce")
+    assert after.new_intensity == pytest.approx(0.53, abs=0.02)
+    assert after.new_intensity > 0.3
 
 
 # --- add: capped at 1.0, at least as large as either individual intensity ---
@@ -94,15 +109,16 @@ def test_new_strategy_always_creates_distinct_pheromone(intensities_seq):
         assert len(bb.pheromones) == n
 
 
-# --- reinforce / replace: result equals the newly emitted intensity, not a blend ---
+# --- reinforce floors at current; replace equals the newly emitted intensity ---
 
 
 @given(first=merge_intensities, second=merge_intensities)
-def test_reinforce_result_equals_newly_emitted_intensity(first, second):
+def test_reinforce_result_equals_max_of_current_and_emitted(first, second):
     bb = _frozen_blackboard()
     _emit(bb, first, "reinforce")
     after = _emit(bb, second, "reinforce")
-    assert after.new_intensity == second
+    assert after.new_intensity == max(first, second)
+    assert after.previous_intensity == first
 
 
 @given(first=merge_intensities, second=merge_intensities)
@@ -118,10 +134,12 @@ def test_replace_result_equals_newly_emitted_intensity(first, second):
 def test_reinforce_and_replace_never_blend_across_sequence(intensities_seq):
     reinforce_bb = _frozen_blackboard()
     replace_bb = _frozen_blackboard()
+    running_max = -1.0
     for i in intensities_seq:
         r_result = _emit(reinforce_bb, i, "reinforce")
         p_result = _emit(replace_bb, i, "replace")
-        assert r_result.new_intensity == i
+        running_max = max(running_max, i)
+        assert r_result.new_intensity == running_max
         assert p_result.new_intensity == i
     assert len(reinforce_bb.pheromones) == 1
     assert len(replace_bb.pheromones) == 1
@@ -131,7 +149,7 @@ def test_reinforce_and_replace_never_blend_across_sequence(intensities_seq):
 
 
 @given(
-    strategy=st.sampled_from(["reinforce", "replace", "max", "add"]),
+    strategy=st.sampled_from(["reinforce", "replace", "add"]),
     intensities_seq=st.lists(merge_intensities, min_size=1, max_size=8),
 )
 def test_merging_strategies_keep_single_pheromone(strategy, intensities_seq):

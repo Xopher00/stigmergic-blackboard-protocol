@@ -5,7 +5,6 @@ SBP Condition Builders - Fluent API for building scent conditions
 from sbp.types import (
     ThresholdCondition,
     CompositeCondition,
-    RateCondition,
     TraceCondition,
     ScentCondition,
 )
@@ -101,34 +100,6 @@ def not_(condition: ScentCondition) -> CompositeCondition:
         not_(threshold("control", "pause", ">=", 0.5))
     """
     return CompositeCondition(operator="not", conditions=[condition])
-
-
-# ============================================================================
-# RATE HELPERS
-# ============================================================================
-
-def rate(
-    trail: str,
-    signal_type: str,
-    operator: str = ">=",
-    value: float = 1.0,
-    window_ms: int = 10000,
-    metric: str = "emissions_per_second",
-) -> RateCondition:
-    """
-    Create a rate-based condition.
-
-    Example:
-        rate("api", "request", ">=", 100, window_ms=10000)  # 100 req/sec over 10s
-    """
-    return RateCondition(
-        trail=trail,
-        signal_type=signal_type,
-        metric=metric,  # type: ignore
-        window_ms=window_ms,
-        operator=operator,  # type: ignore
-        value=value,
-    )
 
 
 # ============================================================================

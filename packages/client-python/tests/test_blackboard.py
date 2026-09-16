@@ -12,7 +12,7 @@ from sbp.blackboard import LocalBlackboard
 from sbp.types import (
     EmitParams, SniffParams, RegisterScentParams, DeregisterScentResult,
     InscribeParams, ReadParams, EraseParams, EvaporateParams, InspectParams,
-    ThresholdCondition, CompositeCondition, ImmortalDecay,
+    ThresholdCondition, CompositeCondition, ExponentialDecay, ImmortalDecay,
 )
 
 
@@ -74,11 +74,11 @@ class TestEmit:
         p = next(iter(bb.pheromones.values()))
         assert p.tags == ["new"]
 
-    def test_max_keeps_higher_intensity(self):
+    def test_reinforce_never_lowers_intensity(self):
         bb = LocalBlackboard()
         _emit(bb, payload={"x": 1}, intensity=0.8)
-        result = _emit(bb, payload={"x": 1}, intensity=0.3, merge_strategy="max")
-        assert result.action == "merged"
+        result = _emit(bb, payload={"x": 1}, intensity=0.3, merge_strategy="reinforce")
+        assert result.action == "reinforced"
         assert result.new_intensity == pytest.approx(0.8, abs=0.01)
 
     def test_add_sums_capped_at_one(self):
@@ -833,3 +833,95 @@ class TestReservedTrailGuard:
         with pytest.raises(PermissionError, match="reserved trail"):
             bb.register_scent(RegisterScentParams(scent_id="s1", agent_endpoint="test://a", condition=cond))
         assert "s1" not in bb.scents
+
+
+class TestInjectableClock:
+    """Every timestamp the blackboard records must come from _now(), including
+    start_time at construction. The construction-time check subclasses rather
+    than assigning bb._now post-hoc: a __init__ that bypasses _now() has already
+    read the real clock before an instance-attribute override could take effect."""
+
+    def test_emit_uses_overridden_now(self):
+        bb = LocalBlackboard()
+        bb._now = lambda: 1_000_000
+
+        result = _emit(bb, intensity=1.0)
+        p = bb.pheromones[result.pheromone_id]
+        assert p.emitted_at == 1_000_000
+        assert p.last_reinforced_at == 1_000_000
+
+    def test_start_time_derived_from_now_at_construction(self):
+        class FixedClock(LocalBlackboard):
+            def _now(self) -> int:
+                return 1_000_000
+
+        bb = FixedClock()
+        assert bb.start_time == 1_000_000
+
+
+class TestGarbageCollection:
+    """gc() mirrors the TS reference implementation (Blackboard.gc): an explicit
+    sweep that deletes pheromones whose computed intensity fell below ttl_floor,
+    plus auto-GC from emit() once the store exceeds max_pheromones. evaporate()
+    stays an independent, criteria-driven operation."""
+
+    def test_gc_removes_expired_pheromones(self):
+        now = 1_000_000
+        bb = LocalBlackboard()
+        bb._now = lambda: now
+
+        _emit(bb, trail="gc", intensity=0.1, decay=ExponentialDecay(half_life_ms=10))
+        assert len(bb.pheromones) == 1
+
+        now += 80  # 0.1 * 0.5^8 ≈ 0.0004, below the 0.01 ttl_floor
+
+        assert bb.gc() == 1
+        assert len(bb.pheromones) == 0
+
+    def test_gc_leaves_live_pheromones(self):
+        now = 1_000_000
+        bb = LocalBlackboard()
+        bb._now = lambda: now
+
+        _emit(bb, trail="dying", intensity=0.1, decay=ExponentialDecay(half_life_ms=10))
+        _emit(bb, trail="live", decay=ImmortalDecay())
+
+        now += 80
+
+        assert bb.gc() == 1
+        assert len(bb.pheromones) == 1
+        assert next(iter(bb.pheromones.values())).trail == "live"
+
+    def test_gc_returns_zero_when_nothing_expired(self):
+        bb = LocalBlackboard()
+        _emit(bb, decay=ImmortalDecay())
+
+        assert bb.gc() == 0
+        assert len(bb.pheromones) == 1
+
+    def test_auto_gc_on_size_threshold(self):
+        now = 1_000_000
+        bb = LocalBlackboard(max_pheromones=3)
+        bb._now = lambda: now
+
+        _emit(bb, trail="a", intensity=0.1, decay=ExponentialDecay(half_life_ms=10))
+        _emit(bb, trail="b", decay=ImmortalDecay())
+        _emit(bb, trail="c", decay=ImmortalDecay())
+        now += 80
+        assert len(bb.pheromones) == 3  # at threshold, nothing swept yet
+
+        _emit(bb, trail="d", decay=ImmortalDecay())  # size 4 > 3 → auto-sweep of "a"
+
+        assert len(bb.pheromones) == 3
+        assert {p.trail for p in bb.pheromones.values()} == {"b", "c", "d"}
+
+    def test_evaporate_still_works_independently(self):
+        bb = LocalBlackboard()
+        _emit(bb, trail="doomed")
+        _emit(bb, trail="keeper")
+
+        result = bb.evaporate(EvaporateParams(trail="doomed"))
+
+        assert result.evaporated_count == 1
+        assert len(bb.pheromones) == 1
+        assert next(iter(bb.pheromones.values())).trail == "keeper"

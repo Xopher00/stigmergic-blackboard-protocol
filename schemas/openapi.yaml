@@ -348,8 +348,6 @@ components:
       oneOf:
         - $ref: "#/components/schemas/ThresholdCondition"
         - $ref: "#/components/schemas/CompositeCondition"
-        - $ref: "#/components/schemas/RateCondition"
-        - $ref: "#/components/schemas/PatternCondition"
         - $ref: "#/components/schemas/TraceCondition"
       discriminator:
         propertyName: type
@@ -390,53 +388,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ScentCondition"
-
-    RateCondition:
-      type: object
-      required: [type, trail, signal_type, metric, window_ms, operator, value]
-      properties:
-        type:
-          type: string
-          const: rate
-        trail:
-          type: string
-        signal_type:
-          type: string
-        metric:
-          type: string
-          enum: [emissions_per_second, intensity_delta]
-        window_ms:
-          type: number
-        operator:
-          type: string
-          enum: [">=", ">", "<=", "<"]
-        value:
-          type: number
-
-    PatternCondition:
-      type: object
-      required: [type, sequence, window_ms]
-      properties:
-        type:
-          type: string
-          const: pattern
-        sequence:
-          type: array
-          items:
-            type: object
-            required: [trail, signal_type]
-            properties:
-              trail:
-                type: string
-              signal_type:
-                type: string
-              min_intensity:
-                type: number
-        window_ms:
-          type: number
-        ordered:
-          type: boolean
-          default: true
 
     TraceCondition:
       type: object
@@ -482,7 +433,7 @@ components:
             type: string
         merge_strategy:
           type: string
-          enum: [reinforce, replace, max, add, new]
+          enum: [reinforce, replace, add, new]
           default: reinforce
         source_agent:
           type: string

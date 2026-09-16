@@ -85,7 +85,7 @@ class SbpWorker:
     SbpAgent.when(), e.g. {"trail": "science.space", "signal_type": "finding", "value": 0.5}
     (single-threshold trigger; also accepts when()'s tags/activation_payload/context_trails
     keys) — or a full sbp.types ScentCondition (ThresholdCondition, CompositeCondition,
-    RateCondition, or TraceCondition for a cross-layer pheromone+trace trigger), routed
+    or TraceCondition for a cross-layer pheromone+trace trigger), routed
     through SbpAgent.on_scent() instead, for an agent that should only wake when multiple
     independent signals hold at once (e.g. CompositeCondition(operator="and",
     conditions=[...]) — see examples/python/sbp_reference.py's crisis-detector).

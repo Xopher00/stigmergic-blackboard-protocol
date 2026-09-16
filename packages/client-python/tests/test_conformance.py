@@ -27,6 +27,7 @@ import asyncio
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from sbp import SbpAgent
 from sbp.types import ExponentialDecay, ImmortalDecay, LinearDecay, StepDecay
@@ -215,13 +216,14 @@ class TestEmitMergeStrategies:
         s = await agent.sniff(trails=["merge.replace"], types=["t"])
         assert s.pheromones[0].tags == ["tag2"]
 
-    async def test_max_keeps_higher_intensity(self, agent):
+    async def test_reinforce_never_lowers_intensity(self, agent):
         await agent.emit(
-            "merge.max", "t", 0.9, decay=ImmortalDecay(), merge_strategy="new"
+            "merge.reinforce", "t", 0.9, decay=ImmortalDecay(), merge_strategy="new"
         )
         r = await agent.emit(
-            "merge.max", "t", 0.2, decay=ImmortalDecay(), merge_strategy="max"
+            "merge.reinforce", "t", 0.2, decay=ImmortalDecay(), merge_strategy="reinforce"
         )
+        assert r.action == "reinforced"
         assert r.new_intensity == pytest.approx(0.9, abs=1e-4)
 
     async def test_add_sums_intensities_capped_at_one(self, agent):
@@ -441,6 +443,38 @@ class TestScentConditions:
         )
         await asyncio.sleep(0.1)  # let the weak one evaporate below ttl_floor
         assert len(triggered) == 0  # only 1 non-evaporated pheromone -- count < 2
+
+
+# ============================================================================
+# 5b. REMOVED CONDITION TYPES -- rate conditions deleted from the protocol
+# ============================================================================
+
+
+class TestRemovedConditionTypes:
+    """RateCondition is removed from ScentCondition (threshold | composite | trace).
+    PatternCondition never existed in the Python SDK, so rate is the only case here."""
+
+    async def test_rate_condition_no_longer_importable(self):
+        # Nested import on purpose: module-level would break collection of this
+        # whole file once RateCondition is deleted from sbp.types.
+        with pytest.raises(ImportError):
+            from sbp.types import RateCondition  # noqa: F401
+
+    async def test_register_scent_rejects_rate_condition_dict(self, agent):
+        with pytest.raises(ValidationError):
+            await agent.register_scent(
+                "rate-removed",
+                {
+                    "type": "rate",
+                    "trail": "removed.rate",
+                    "signal_type": "sig",
+                    "metric": "emissions_per_second",
+                    "window_ms": 1000,
+                    "operator": ">=",
+                    "value": 5,
+                },
+                cooldown_ms=0,
+            )
 
 
 # ============================================================================

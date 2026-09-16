@@ -130,18 +130,6 @@ class CompositeCondition(BaseModel):
     conditions: list["ScentCondition"]
 
 
-class RateCondition(BaseModel):
-    """Rate-based condition"""
-
-    type: Literal["rate"] = "rate"
-    trail: str
-    signal_type: str
-    metric: Literal["emissions_per_second", "intensity_delta"]
-    window_ms: int = Field(gt=0)
-    operator: Literal[">=", ">", "<=", "<"] = ">="
-    value: float
-
-
 class TraceCondition(BaseModel):
     """Trace-based condition — triggers on durable knowledge state"""
 
@@ -153,7 +141,7 @@ class TraceCondition(BaseModel):
     expected: Any | None = None             # Expected value for comparison
 
 
-ScentCondition = Union[ThresholdCondition, CompositeCondition, RateCondition, TraceCondition]
+ScentCondition = Union[ThresholdCondition, CompositeCondition, TraceCondition]
 
 # Update forward refs for recursive types
 CompositeCondition.model_rebuild()
@@ -162,6 +150,9 @@ CompositeCondition.model_rebuild()
 # ============================================================================
 # OPERATION PARAMS & RESULTS
 # ============================================================================
+
+
+MergeStrategy = Literal["reinforce", "replace", "add", "new"]
 
 
 class EmitParams(BaseModel):
@@ -173,7 +164,7 @@ class EmitParams(BaseModel):
     decay: DecayModel | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
-    merge_strategy: Literal["reinforce", "replace", "max", "add", "new"] = "reinforce"
+    merge_strategy: MergeStrategy = "reinforce"
     source_agent: str | None = None
 
 

@@ -13,7 +13,6 @@ from sbp.types import (
     PheromoneSnapshot,
     ThresholdCondition,
     CompositeCondition,
-    RateCondition,
     TraceCondition,
     ScentCondition,
     EmitParams,
@@ -45,8 +44,6 @@ from sbp.conditions import (
     and_,
     or_,
     not_,
-    # Rate builders
-    rate,
     # Trace builders
     trace_exists,
     trace_not_exists,
@@ -79,7 +76,6 @@ __all__ = [
     # Types - Conditions
     "ThresholdCondition",
     "CompositeCondition",
-    "RateCondition",
     "TraceCondition",
     "ScentCondition",
     # Types - Operations
@@ -110,8 +106,6 @@ __all__ = [
     "and_",
     "or_",
     "not_",
-    # Condition Builders - Rate
-    "rate",
     # Condition Builders - Trace
     "trace_exists",
     "trace_not_exists",

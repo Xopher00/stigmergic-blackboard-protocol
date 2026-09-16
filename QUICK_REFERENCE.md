@@ -144,19 +144,6 @@
 }
 ```
 
-**Rate** - Change detection:
-```json
-{
-  "type": "rate",
-  "trail": "market.signals",
-  "signal_type": "volatility",
-  "metric": "emissions_per_second",
-  "window_ms": 10000,
-  "operator": ">=",
-  "value": 5
-}
-```
-
 **Trace** - Durable knowledge state:
 ```json
 {

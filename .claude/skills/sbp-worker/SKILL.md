@@ -20,7 +20,7 @@ example: researcher/writer agents) before writing anything.
    - Simple dict, e.g. `{"trail": "science.space", "signal_type": "finding", "value": 0.5}`
      — single-threshold, routed through `SbpAgent.when()`.
    - A full `sbp.types` `ScentCondition` object (`ThresholdCondition`,
-     `CompositeCondition`, `RateCondition`, or `TraceCondition` for a cross-layer
+     `CompositeCondition`, or `TraceCondition` for a cross-layer
      pheromone+trace trigger) — routed through `SbpAgent.on_scent()` instead. Use this
      when the agent should only wake on multiple independent signals holding at once
      (e.g. `CompositeCondition(operator="and", conditions=[...])`) — this is SBP's own

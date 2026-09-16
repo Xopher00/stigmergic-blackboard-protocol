@@ -92,32 +92,19 @@ export interface CompositeCondition {
   conditions: ScentCondition[];
 }
 
-export interface RateCondition {
-  type: "rate";
+export interface TraceCondition {
+  type: "trace";
   trail: string;
-  signal_type: string;
-  metric: "emissions_per_second" | "intensity_delta";
-  window_ms: number;
-  operator: ">=" | ">" | "<=" | "<";
-  value: number;
-}
-
-export interface PatternCondition {
-  type: "pattern";
-  sequence: Array<{
-    trail: string;
-    signal_type: string;
-    min_intensity?: number;
-  }>;
-  window_ms: number;
-  ordered?: boolean;
+  key: string;                   // "*" for any key in trail
+  operator: "exists" | "not_exists" | "value_eq" | "value_neq";
+  field?: string;                // Dot-separated path into trace value (for value_eq/neq)
+  expected?: unknown;            // Expected value for comparison
 }
 
 export type ScentCondition =
   | ThresholdCondition
   | CompositeCondition
-  | RateCondition
-  | PatternCondition;
+  | TraceCondition;
 
 // ============================================================================
 // OPERATIONS
