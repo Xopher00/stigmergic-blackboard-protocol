@@ -323,6 +323,8 @@ components:
           type: array
           items:
             type: string
+        source_agent:
+          type: string
 
     # -- Tag Filter --
     TagFilter:
@@ -565,19 +567,19 @@ components:
           $ref: "#/components/schemas/ScentCondition"
         cooldown_ms:
           type: number
-          default: 0
+          default: 1000
         activation_payload:
           type: object
         trigger_mode:
           type: string
           enum: [level, edge_rising, edge_falling]
-          default: level
+          default: edge_rising
         hysteresis:
           type: number
           default: 0
         max_execution_ms:
           type: number
-          default: 30000
+          default: 120000
         context_trails:
           type: array
           items:

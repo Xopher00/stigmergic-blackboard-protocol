@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any, Callable, Awaitable, Set
 
 from sbp.types import (
     Pheromone, PheromoneSnapshot,
-    ScentCondition, DecayModel,
+    ScentCondition, CompositeCondition, DecayModel, ExponentialDecay,
     EmitParams, EmitResult,
     SniffParams, SniffResult, AggregateStats,
     RegisterScentParams, RegisterScentResult,
@@ -45,6 +45,9 @@ class LocalBlackboard:
         self._running = False
         self._task = None
         self._dispatch_tasks: Set[asyncio.Task] = set()
+
+        # Ownership prefixes whose scents refuse mutation and skip evaluation/dispatch
+        self._frozen_prefixes: Set[str] = set()
 
     def _trace_key(self, trail: str, key: str) -> str:
         return f"{trail}\0{key}"
@@ -179,16 +182,7 @@ class LocalBlackboard:
             if params.tags and not match_tags(p.tags, params.tags): continue
 
             # Add to results
-            snapshot = PheromoneSnapshot(
-                id=p.id,
-                trail=p.trail,
-                type=p.type,
-                current_intensity=intensity,
-                payload=p.payload,
-                age_ms=now - p.emitted_at,
-                tags=p.tags
-            )
-            results.append(snapshot)
+            results.append(self._create_snapshot(p, now))
 
             # Aggregate
             key = f"{p.trail}/{p.type}"
@@ -217,23 +211,39 @@ class LocalBlackboard:
             aggregates=aggs
         )
 
-    def register_scent(self, params: RegisterScentParams) -> RegisterScentResult:
+    def register_scent(
+        self, params: RegisterScentParams, agent_id: str | None = None
+    ) -> RegisterScentResult:
+        resolved = self._resolve_scent_id(params.scent_id, agent_id)
+        if self._scent_frozen(resolved):
+            raise PermissionError("refused register_scent: prefix is frozen")
+
+        for t in self._condition_trails(params.condition):
+            if t == "system" or t.startswith("system."):
+                raise PermissionError(
+                    f"refused register_scent: condition watches reserved trail '{t}'; "
+                    "system namespace is reserved so stall signals cannot cascade"
+                )
+
         now = self._now()
-        is_update = params.scent_id in self.scents
+        is_update = resolved in self.scents
 
         scent = {
-            "id": params.scent_id,
+            "id": resolved,
             "condition": params.condition,
             "cooldown_ms": params.cooldown_ms,
             "activation_payload": params.activation_payload,
             "context_trails": params.context_trails,
             "trigger_mode": params.trigger_mode,
             "hysteresis": params.hysteresis,
+            "max_execution_ms": params.max_execution_ms,
             "armed": True,
             "last_triggered_at": 0,
-            "last_condition_met": False
+            "last_condition_met": False,
+            "running": False,
+            "skipped_fires": 0
         }
-        self.scents[params.scent_id] = scent
+        self.scents[resolved] = scent
 
         # Evaluate immediately to return state
         ctx = EvaluationContext(
@@ -243,25 +253,92 @@ class LocalBlackboard:
         result = evaluate_condition(params.condition, ctx)
 
         return RegisterScentResult(
-            scent_id=params.scent_id,
+            scent_id=resolved,
             status="updated" if is_update else "registered",
             current_condition_state={"met": result.met}
         )
 
-    def deregister_scent(self, scent_id: str) -> DeregisterScentResult:
-        if scent_id in self.scents:
-            del self.scents[scent_id]
-            if scent_id in self.handlers:
-                del self.handlers[scent_id]
-            return DeregisterScentResult(scent_id=scent_id, status="deregistered")
-        return DeregisterScentResult(scent_id=scent_id, status="not_found")
+    def deregister_scent(
+        self, scent_id: str, agent_id: str | None = None
+    ) -> DeregisterScentResult:
+        resolved = self._resolve_scent_id(scent_id, agent_id)
+        if self._scent_frozen(resolved):
+            raise PermissionError("refused deregister_scent: prefix is frozen")
+        if resolved in self.scents:
+            del self.scents[resolved]
+            if resolved in self.handlers:
+                del self.handlers[resolved]
+            return DeregisterScentResult(scent_id=resolved, status="deregistered")
+        return DeregisterScentResult(scent_id=resolved, status="not_found")
 
-    def subscribe(self, scent_id: str, handler: Callable[[TriggerPayload], Awaitable[None]]):
-        self.handlers[scent_id] = handler
+    def subscribe(
+        self,
+        scent_id: str,
+        handler: Callable[[TriggerPayload], Awaitable[None]],
+        agent_id: str | None = None,
+    ) -> None:
+        resolved = self._resolve_scent_id(scent_id, agent_id)
+        if self._scent_frozen(resolved):
+            raise PermissionError("refused subscribe: prefix is frozen")
+        if resolved in self.handlers:
+            raise ValueError(
+                f"scent '{resolved}' is already subscribed; "
+                f"unsubscribe('{resolved}') first to replace it"
+            )
+        self.handlers[resolved] = handler
 
-    def unsubscribe(self, scent_id: str):
-        if scent_id in self.handlers:
-            del self.handlers[scent_id]
+    def unsubscribe(self, scent_id: str, agent_id: str | None = None) -> None:
+        resolved = self._resolve_scent_id(scent_id, agent_id)
+        if self._scent_frozen(resolved):
+            raise PermissionError("refused unsubscribe: prefix is frozen")
+        if resolved in self.handlers:
+            del self.handlers[resolved]
+
+    def _resolve_scent_id(self, scent_id: str, agent_id: str | None) -> str:
+        # agent_id=None is the legacy path: no prefixing, no ownership checks
+        if agent_id is None:
+            return scent_id
+        if ":" not in scent_id:
+            return f"{agent_id}:{scent_id}"
+        claimed = scent_id.split(":", 1)[0]
+        if claimed == agent_id:
+            return scent_id
+        raise PermissionError(
+            f"scent_id '{scent_id}' claims foreign prefix '{claimed}:'; "
+            f"agent '{agent_id}' may only own '{agent_id}:'"
+        )
+
+    def freeze(self, agent_id_prefix: str) -> None:
+        self._frozen_prefixes.add(agent_id_prefix)
+
+    def unfreeze(self, agent_id_prefix: str) -> None:
+        self._frozen_prefixes.discard(agent_id_prefix)
+
+    def _scent_frozen(self, scent_id: str) -> bool:
+        return any(scent_id.startswith(p) for p in self._frozen_prefixes)
+
+    def _condition_trails(self, condition: ScentCondition) -> list[str]:
+        # Composites nest arbitrarily deep; every leaf watches a trail.
+        if isinstance(condition, CompositeCondition):
+            return [t for sub in condition.conditions for t in self._condition_trails(sub)]
+        return [condition.trail]
+
+    def _log_event(self, now: int, agent: str, event: str, detail: str) -> None:
+        print(json.dumps({"time": now, "agent": agent, "event": event, "detail": detail}))
+
+    def _emit_stall(
+        self, scent_id: str, cause: str, extra_payload: dict[str, Any], now: int
+    ) -> None:
+        # Default "reinforce" merge: repeated identical-shape stalls reinforce
+        # one signal instead of piling up new pheromones.
+        self.emit(EmitParams(
+            trail="system.errors",
+            type="stalled",
+            intensity=1.0,
+            decay=ExponentialDecay(half_life_ms=60000),
+            payload={"scent_id": scent_id, "cause": cause, **extra_payload},
+            source_agent="blackboard",
+        ))
 
     async def evaluate_scents(self):
         now = self._now()
@@ -272,6 +349,10 @@ class LocalBlackboard:
         )
 
         for scent in self.scents.values():
+            # Frozen scents are skipped wholesale: no condition work, no state churn
+            if self._scent_frozen(scent["id"]):
+                continue
+
             # Cooldown check
             if now - scent["last_triggered_at"] < scent["cooldown_ms"]:
                 continue
@@ -309,51 +390,84 @@ class LocalBlackboard:
 
             scent["last_condition_met"] = met
 
+            # §7.1: while an activation is in flight, further qualifying evaluations
+            # are skipped — no cooldown update, no hysteresis disarm on a skipped tick.
+            if should_trigger and scent.get("running"):
+                scent["skipped_fires"] += 1
+                should_trigger = False
+
             if should_trigger:
                 scent["last_triggered_at"] = now
                 if hysteresis > 0 and edge_mode:
                     scent["armed"] = False
                 # Fire-and-forget: a slow/blocked handler for this scent must not
                 # delay trigger delivery to other scents in this loop (SPECIFICATION.md §7.1).
+                scent["running"] = True
                 task = asyncio.create_task(self._dispatch_trigger(scent, result, now))
                 self._dispatch_tasks.add(task)
                 task.add_done_callback(self._dispatch_tasks.discard)
 
     async def _dispatch_trigger(self, scent: Dict[str, Any], result, now: int):
-        # Build context
-        context = []
-        matching_ids = set(result.matching_pheromone_ids)
+        try:
+            # Silent skip, never a raise — a dispatch in flight when a freeze lands
+            # must still clear `running` via the finally below.
+            if self._scent_frozen(scent["id"]):
+                return
 
-        # Include context trails if specified
-        if scent.get("context_trails"):
-            for p in self.pheromones.values():
-                if p.trail in scent["context_trails"] and not is_evaporated(p, now):
-                    context.append(self._create_snapshot(p, now))
-        else:
-            # Otherwise include matching
-            for pid in matching_ids:
-                if pid in self.pheromones:
-                    context.append(self._create_snapshot(self.pheromones[pid], now))
+            context = []
+            matching_ids = set(result.matching_pheromone_ids)
 
-        payload = TriggerPayload(
-            scent_id=scent["id"],
-            triggered_at=now,
-            condition_snapshot={
-                scent["id"]: {
-                    "value": result.value,
-                    "pheromone_ids": list(matching_ids)
-                }
-            },
-            context_pheromones=context,
-            activation_payload=scent["activation_payload"]
-        )
+            if scent.get("context_trails"):
+                for p in self.pheromones.values():
+                    if p.trail in scent["context_trails"] and not is_evaporated(p, now):
+                        context.append(self._create_snapshot(p, now))
+            else:
+                for pid in matching_ids:
+                    if pid in self.pheromones:
+                        context.append(self._create_snapshot(self.pheromones[pid], now))
 
-        handler = self.handlers.get(scent["id"])
-        if handler:
-            try:
-                await handler(payload)
-            except Exception as e:
-                print(f"[SBP Local] Handler error: {e}")
+            payload = TriggerPayload(
+                scent_id=scent["id"],
+                triggered_at=now,
+                condition_snapshot={
+                    scent["id"]: {
+                        "value": result.value,
+                        "pheromone_ids": list(matching_ids)
+                    }
+                },
+                context_pheromones=context,
+                activation_payload=scent["activation_payload"]
+            )
+
+            handler = self.handlers.get(scent["id"])
+            if handler:
+                try:
+                    await asyncio.wait_for(
+                        handler(payload), timeout=scent["max_execution_ms"] / 1000
+                    )
+                except asyncio.TimeoutError:
+                    self._log_event(
+                        now, scent["id"], "activation_timeout",
+                        f"activation timed out after {scent['max_execution_ms']}ms",
+                    )
+                    self._emit_stall(
+                        scent["id"], "timeout", {"timeout_ms": scent["max_execution_ms"]}, now
+                    )
+                # asyncio.TimeoutError subclasses Exception on Python 3.10, so it is caught first
+                except Exception as e:
+                    self._log_event(now, scent["id"], "handler_error", f"{type(e).__name__}: {e}")
+                    self._emit_stall(
+                        scent["id"], "exception", {"error": f"{type(e).__name__}: {e}"}, now
+                    )
+        finally:
+            scent["running"] = False
+            skipped = scent.get("skipped_fires", 0)
+            if skipped > 0:
+                print(
+                    f"[SBP Local] Scent {scent['id']}: {skipped} fires were skipped "
+                    "while an activation was running."
+                )
+                scent["skipped_fires"] = 0
 
     def _create_snapshot(self, p: Pheromone, now: int) -> PheromoneSnapshot:
         return PheromoneSnapshot(
@@ -363,7 +477,8 @@ class LocalBlackboard:
             current_intensity=compute_intensity(p, now),
             payload=p.payload,
             age_ms=now - p.emitted_at,
-            tags=p.tags
+            tags=p.tags,
+            source_agent=p.source_agent
         )
 
     def _prune_history(self, now: int):

@@ -126,6 +126,23 @@ describe("Blackboard", () => {
     });
   });
 
+  describe("snapshot source_agent propagation", () => {
+    it("propagates source_agent from emit through sniff", () => {
+      bb.emit({
+        trail: "test.signals",
+        type: "event",
+        intensity: 0.9,
+        decay: { type: "immortal" },
+        merge_strategy: "new",
+        source_agent: "writer-1",
+      });
+
+      const result = bb.sniff({ trails: ["test.signals"] });
+      expect(result.pheromones.length).toBe(1);
+      expect(result.pheromones[0].source_agent).toBe("writer-1");
+    });
+  });
+
   describe("registerScent", () => {
     it("should register a new scent", () => {
       const result = bb.registerScent({

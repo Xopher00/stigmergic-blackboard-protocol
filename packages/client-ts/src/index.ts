@@ -31,6 +31,7 @@ export interface PheromoneSnapshot {
   payload: Record<string, unknown>;
   age_ms: number;
   tags: string[];
+  source_agent?: string;
 }
 
 export interface ThresholdCondition {

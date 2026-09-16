@@ -11,7 +11,10 @@ import asyncio
 import pytest
 
 from sbp.agent import SbpAgent
+from sbp.blackboard import get_shared_blackboard
+from sbp.client import AsyncSbpClient
 from sbp.types import EmitResult, SniffResult, ThresholdCondition, CompositeCondition
+from sbp.types import ImmortalDecay
 
 
 class TestRaisesBeforeRunning:
@@ -168,3 +171,119 @@ class TestRunLifecycle:
 
         assert len(fired) == 1
         assert fired[0].scent_id == "staged:t/e"
+
+
+class TestStopCleansDynamicScents:
+    @pytest.mark.asyncio
+    async def test_stop_deregisters_scent_registered_while_running(self):
+        bb = get_shared_blackboard()
+        agent = SbpAgent("dyn", local=True)
+        fired = []
+
+        async def handler(trigger):
+            fired.append(trigger)
+
+        task = asyncio.create_task(agent.run())
+        await asyncio.sleep(0.2)
+
+        # exactly what sbp_register_scent does mid-run: register + subscribe
+        await agent.register_scent(
+            "dynamic", ThresholdCondition(trail="t", signal_type="e", value=0.5), cooldown_ms=0
+        )
+        await agent.subscribe("dynamic", handler)
+
+        agent.stop()
+        await asyncio.wait_for(task, timeout=5)
+
+        assert "dyn:dynamic" not in bb.scents
+        assert "dyn:dynamic" not in bb.handlers
+
+        # The shared loop must be alive here or "never fires" passes vacuously even on
+        # broken code -- a stopped evaluation loop silences zombie handlers too.
+        observer = AsyncSbpClient("http://localhost:3000", agent_id="observer", local=True)
+        await observer.connect()
+        try:
+            await observer.emit("t", "e", 0.9)
+            await asyncio.sleep(0.5)
+        finally:
+            await observer.close()
+
+        assert fired == []
+
+
+class TestFreezeEndToEnd:
+    async def _poll(self, get_count, target, timeout=2.0):
+        # the shared blackboard's loop ticks every 100ms; poll instead of a fixed
+        # sleep so a slow first dispatch never makes the test flaky
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while get_count() < target and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+        return get_count()
+
+    @pytest.mark.asyncio
+    async def test_frozen_agent_stops_dispatching_while_running(self):
+        bb = get_shared_blackboard()
+        fired_fz = []
+        fired_ctrl = []
+
+        async def fz_handler(trigger):
+            fired_fz.append(trigger)
+
+        async def ctrl_handler(trigger):
+            fired_ctrl.append(trigger)
+
+        agent_fz = SbpAgent("fz", local=True)
+        agent_ctrl = SbpAgent("ctrl", local=True)
+        task_fz = asyncio.create_task(agent_fz.run())
+        task_ctrl = asyncio.create_task(agent_ctrl.run())
+
+        try:
+            await asyncio.sleep(0.2)
+
+            # P1.2 zombie-test style: register + subscribe dynamically while running,
+            # each on its OWN trail; the same bare scent_id must resolve per-agent, not collide
+            await agent_fz.register_scent(
+                "watch", ThresholdCondition(trail="t-fz", signal_type="e", value=0.5),
+                trigger_mode="level", cooldown_ms=0,
+            )
+            await agent_fz.subscribe("watch", fz_handler)
+            await agent_ctrl.register_scent(
+                "watch", ThresholdCondition(trail="t-ctrl", signal_type="e", value=0.5),
+                trigger_mode="level", cooldown_ms=0,
+            )
+            await agent_ctrl.subscribe("watch", ctrl_handler)
+
+            await agent_fz.emit("t-fz", "e", 0.9, decay=ImmortalDecay())
+            await agent_ctrl.emit("t-ctrl", "e", 0.9, decay=ImmortalDecay())
+            # both must be armed and firing, or "frozen silence" would pass vacuously
+            assert await self._poll(lambda: len(fired_fz), 1) >= 1
+            assert await self._poll(lambda: len(fired_ctrl), 1) >= 1
+
+            # level+0ms re-fires every tick while the condition holds, so drain both
+            # trails first and snapshot right after the sync freeze() -- no tick slips between
+            await agent_fz.evaporate(trail="t-fz")
+            await agent_ctrl.evaporate(trail="t-ctrl")
+            await asyncio.sleep(0.15)
+
+            bb.freeze("fz")
+            fz_before = len(fired_fz)
+            ctrl_before = len(fired_ctrl)
+
+            await agent_fz.emit("t-fz", "e", 0.9, decay=ImmortalDecay(), merge_strategy="new")
+            await agent_ctrl.emit("t-ctrl", "e", 0.9, decay=ImmortalDecay(), merge_strategy="new")
+            await asyncio.sleep(0.3)
+
+            assert len(fired_fz) == fz_before
+            assert len(fired_ctrl) > ctrl_before  # canary: shared loop genuinely alive
+
+            bb.unfreeze("fz")
+            await agent_fz.emit("t-fz", "e", 0.9, decay=ImmortalDecay(), merge_strategy="new")
+            await self._poll(lambda: len(fired_fz), fz_before + 1)
+        finally:
+            agent_fz.stop()
+            agent_ctrl.stop()
+            await asyncio.wait_for(task_fz, timeout=5)
+            await asyncio.wait_for(task_ctrl, timeout=5)
+
+        assert len(fired_fz) > fz_before

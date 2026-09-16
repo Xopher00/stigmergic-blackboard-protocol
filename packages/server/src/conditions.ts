@@ -334,6 +334,7 @@ export function createSnapshot(pheromone: Pheromone, now: number): PheromoneSnap
     payload: pheromone.payload,
     age_ms: now - pheromone.emitted_at,
     tags: pheromone.tags,
+    source_agent: pheromone.source_agent,
   };
 }
 

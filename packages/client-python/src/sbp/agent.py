@@ -38,7 +38,7 @@ class ScentRegistration:
     scent_id: str
     condition: ScentCondition
     handler: Callable[[TriggerPayload], Awaitable[None]]
-    cooldown_ms: int = 0
+    cooldown_ms: int = 1000
     activation_payload: dict[str, Any] = field(default_factory=dict)
     context_trails: list[str] | None = None
 
@@ -83,6 +83,7 @@ class SbpAgent:
         self.local = local
         self._client: AsyncSbpClient | None = None
         self._scents: list[ScentRegistration] = []
+        self._dynamic_scent_ids: set[str] = set()
         self._running = False
 
     def on_scent(
@@ -90,7 +91,7 @@ class SbpAgent:
         scent_id: str,
         condition: ScentCondition,
         *,
-        cooldown_ms: int = 0,
+        cooldown_ms: int = 1000,
         activation_payload: dict[str, Any] | None = None,
         context_trails: list[str] | None = None,
     ) -> Callable[[Callable[[TriggerPayload], Awaitable[None]]], Callable[[TriggerPayload], Awaitable[None]]]:
@@ -130,7 +131,7 @@ class SbpAgent:
         aggregation: str = "max",
         operator: str = ">=",
         value: float,
-        cooldown_ms: int = 0,
+        cooldown_ms: int = 1000,
         tags: TagFilter | None = None,
         activation_payload: dict[str, Any] | None = None,
         context_trails: list[str] | None = None,
@@ -262,9 +263,9 @@ class SbpAgent:
         condition: ScentCondition,
         *,
         agent_endpoint: str | None = None,
-        cooldown_ms: int = 0,
+        cooldown_ms: int = 1000,
         activation_payload: dict[str, Any] | None = None,
-        trigger_mode: str = "level",
+        trigger_mode: str = "edge_rising",
         hysteresis: float = 0,
         context_trails: list[str] | None = None,
     ) -> RegisterScentResult:
@@ -274,7 +275,7 @@ class SbpAgent:
         if not self._client:
             raise RuntimeError("Agent not running")
 
-        return await self._client.register_scent(
+        result = await self._client.register_scent(
             scent_id,
             condition,
             agent_endpoint=agent_endpoint,
@@ -284,13 +285,17 @@ class SbpAgent:
             hysteresis=hysteresis,
             context_trails=context_trails,
         )
+        self._dynamic_scent_ids.add(scent_id)
+        return result
 
     async def deregister_scent(self, scent_id: str) -> DeregisterScentResult:
         """Deregister one scent directly, callable any time while running."""
         if not self._client:
             raise RuntimeError("Agent not running")
 
-        return await self._client.deregister_scent(scent_id)
+        result = await self._client.deregister_scent(scent_id)
+        self._dynamic_scent_ids.discard(scent_id)
+        return result
 
     async def evaporate(
         self,
@@ -362,9 +367,11 @@ class SbpAgent:
             pass
         finally:
             # Cleanup
-            for scent in self._scents:
-                await self._client.unsubscribe(scent.scent_id)
-                await self._client.deregister_scent(scent.scent_id)
+            staged_ids = {s.scent_id for s in self._scents}
+            for scent_id in staged_ids | self._dynamic_scent_ids:
+                await self._client.unsubscribe(scent_id)
+                await self._client.deregister_scent(scent_id)
+            self._dynamic_scent_ids.clear()
 
             await self._client.close()
             print(f"[SBP Agent] {self.agent_id} stopped")

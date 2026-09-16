@@ -1,6 +1,6 @@
 ---
 name: sbp-worker
-description: Add a new SBP-reactive LangChain agent to examples/python/langchain_demo/. Use when asked to create, add, or register a new agent that reacts to the SBP blackboard (emit/sniff/inscribe/read/erase/evaporate/inspect/register_scent/deregister_scent) in this repo — points at the one existing primitive (SbpWorker) instead of re-deriving or duplicating it.
+description: Add a new SBP-reactive LangChain agent to examples/python/langchain_demo/. Use when asked to create, add, or register a new agent that reacts to the SBP blackboard (emit/sniff/inscribe/read/erase/evaporate/register_scent/deregister_scent) in this repo — points at the one existing primitive (SbpWorker) instead of re-deriving or duplicating it.
 ---
 
 # Adding an SBP agent
@@ -30,8 +30,7 @@ example: researcher/writer agents) before writing anything.
    it loop/stall (this happened once in this project's history). Default (`sbp_ops`
    unset) is `emit`/`sniff`/`inscribe`/`read`. Opt-in only, when genuinely needed:
    `erase` (destructive), `evaporate` (force-remove stale signals now instead of waiting
-   for decay), `inspect` (global blackboard snapshot — not trail-scoped, unlike every
-   other op), `register_scent`/`deregister_scent` (start/stop watching a *new* condition
+   for decay), `register_scent`/`deregister_scent` (start/stop watching a *new* condition
    live while already running — pairs internally with `subscribe`/`unsubscribe`, which
    are not exposed as tools directly, only used by these two). Also set
    `allowed_trails` to scope which trails it may touch.
@@ -46,6 +45,16 @@ example: researcher/writer agents) before writing anything.
    pass a separate trimmer middleware.
 6. Construct it: `SbpWorker(agent_id, model, system_prompt, listens_for=..., sbp_ops=...)`.
    Add its `.run()` to the fleet's background asyncio tasks, and `.stop()` to teardown.
+
+## Untrusted data labeling (provenance, not a sandbox)
+
+Tool results (`sbp_sniff`, `sbp_read`) and wake messages wrap other agents' payloads in
+`[UNTRUSTED DATA — written by agent "…" at …]` blocks carrying the writer's agent ID and a UTC
+timestamp. This makes origins visible and traceable, but does NOT make prompt injection
+impossible — a hostile payload can still address the model directly. The real defenses are the
+permission lists (`sbp_ops`, `allowed_trails`) and the removed `sbp_inspect` tool surface from
+the "close the permission holes" work: configure those, and treat the label as provenance, not
+a sandbox.
 
 ## Model
 

@@ -198,11 +198,11 @@
         "scent_id": { "type": "string" },
         "agent_endpoint": { "type": "string", "format": "uri" },
         "condition": { "$ref": "#/definitions/ScentCondition" },
-        "cooldown_ms": { "type": "integer", "minimum": 0, "default": 0 },
+        "cooldown_ms": { "type": "integer", "minimum": 0, "default": 1000 },
         "activation_payload": { "type": "object" },
-        "trigger_mode": { "enum": ["level", "edge_rising", "edge_falling"], "default": "level" },
+        "trigger_mode": { "enum": ["level", "edge_rising", "edge_falling"], "default": "edge_rising" },
         "hysteresis": { "type": "number", "minimum": 0, "maximum": 1 },
-        "max_execution_ms": { "type": "integer", "minimum": 1, "default": 30000 }
+        "max_execution_ms": { "type": "integer", "minimum": 1, "default": 120000 }
       },
       "required": ["scent_id", "agent_endpoint", "condition"]
     },

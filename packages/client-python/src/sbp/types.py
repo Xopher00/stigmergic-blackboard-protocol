@@ -89,6 +89,7 @@ class PheromoneSnapshot(BaseModel):
     payload: dict[str, Any]
     age_ms: int
     tags: list[str] = Field(default_factory=list)
+    source_agent: str | None = None
 
 
 # ============================================================================
@@ -220,11 +221,11 @@ class RegisterScentParams(BaseModel):
     scent_id: str
     agent_endpoint: str
     condition: ScentCondition
-    cooldown_ms: int = 0
+    cooldown_ms: int = 1000
     activation_payload: dict[str, Any] = Field(default_factory=dict)
-    trigger_mode: Literal["level", "edge_rising", "edge_falling"] = "level"
+    trigger_mode: Literal["level", "edge_rising", "edge_falling"] = "edge_rising"
     hysteresis: float = 0
-    max_execution_ms: int = 30000
+    max_execution_ms: int = 120_000
     context_trails: list[str] | None = None
 
 

@@ -345,6 +345,7 @@ Sense the current environmental state. Unlike polling, SNIFF is a one-time read 
         "type": "volatility",
         "current_intensity": 0.65,
         "payload": { "symbol": "BTC-USD", "vix_equivalent": 45.2 },
+        "source_agent": "market-watcher",
         "age_ms": 120000
       }
     ],
@@ -484,6 +485,15 @@ When a scent condition is met, the blackboard sends a trigger to the registered 
     },
     "context_pheromones": [
       // Full pheromone objects from context_trails
+      {
+        "id": "01945abc-def0-7890-abcd-ef1234567890",
+        "trail": "market.signals",
+        "type": "volatility",
+        "current_intensity": 0.85,
+        "payload": { "symbol": "BTC-USD", "vix_equivalent": 45.2 },
+        "source_agent": "market-watcher",
+        "age_ms": 120000
+      }
     ],
     "activation_payload": {
       "urgency": "high"
@@ -679,6 +689,10 @@ The blackboard continuously evaluates registered scent conditions. Evaluation SH
 Implementations MUST dispatch triggers for different scents concurrently; a slow or blocked
 handler for one scent MUST NOT delay trigger delivery to another.
 
+Implementations MUST allow at most one in-flight activation per scent: trigger evaluations that
+occur while an activation for that scent is running MUST be counted as skipped, and the count MUST
+be reported when the activation completes.
+
 ### 7.2 Cooldown
 
 After triggering, a scent MUST enter cooldown for `cooldown_ms`. During cooldown:
@@ -699,9 +713,9 @@ This prevents trigger storms from rapidly fluctuating signals.
 
 ### 7.4 Edge vs Level Triggering
 
-SBP MUST use **level triggering** by default: triggers fire when conditions become true. Combined with cooldown, this provides predictable behavior.
+SBP MUST use **edge triggering** by default: `trigger_mode` defaults to `edge_rising`, firing only when the condition crosses the threshold upward. Level triggering remains available via `"level"`: triggers fire when conditions become true; combined with cooldown, this provides predictable behavior. Level-mode scents default to `cooldown_ms` 1000 when unspecified; explicit `cooldown_ms=0` remains legal.
 
-Optional edge-triggering mode:
+Edge-triggering configuration:
 ```json
 {
   "trigger_mode": "edge_rising",  // Trigger only when crossing threshold upward
@@ -846,7 +860,7 @@ Agents SHOULD NOT:
 
 ### 8.4 Activation Timeout
 
-Triggers SHOULD include `max_execution_ms`. If an agent exceeds this, the blackboard:
+Triggers SHOULD include `max_execution_ms`. If omitted, the default is `120000` ms (120 seconds). If an agent exceeds this, the blackboard:
 - MUST mark the activation as timed out
 - MAY emit a `system.errors/agent_timeout` pheromone
 

@@ -139,9 +139,13 @@ class AsyncSbpClient:
             elif method == "sbp/sniff":
                 return self._local_blackboard.sniff(SniffParams(**params)).model_dump()
             elif method == "sbp/register_scent":
-                return self._local_blackboard.register_scent(RegisterScentParams(**params)).model_dump()
+                return self._local_blackboard.register_scent(
+                    RegisterScentParams(**params), agent_id=self.agent_id
+                ).model_dump()
             elif method == "sbp/deregister_scent":
-                return self._local_blackboard.deregister_scent(params["scent_id"]).model_dump()
+                return self._local_blackboard.deregister_scent(
+                    params["scent_id"], agent_id=self.agent_id
+                ).model_dump()
             elif method == "sbp/evaporate":
                 return self._local_blackboard.evaporate(EvaporateParams(**params)).model_dump()
             elif method == "sbp/inspect":
@@ -260,9 +264,9 @@ class AsyncSbpClient:
         condition: ScentCondition,
         *,
         agent_endpoint: str | None = None,
-        cooldown_ms: int = 0,
+        cooldown_ms: int = 1000,
         activation_payload: dict[str, Any] | None = None,
-        trigger_mode: str = "level",
+        trigger_mode: str = "edge_rising",
         hysteresis: float = 0,
         context_trails: list[str] | None = None,
     ) -> RegisterScentResult:
@@ -399,12 +403,14 @@ class AsyncSbpClient:
         handler: Callable[[TriggerPayload], Awaitable[None]],
     ) -> None:
         """Subscribe to triggers for a scent"""
-        self._sse_handlers[scent_id] = handler
-
         if self.local and self._local_blackboard:
-            # Register handler directly
-            self._local_blackboard.subscribe(scent_id, handler)
+            # Blackboard call first: a refused subscribe (overwrite/ownership/frozen)
+            # must leave no handler behind in the client-side tracking dict
+            self._local_blackboard.subscribe(scent_id, handler, agent_id=self.agent_id)
+            self._sse_handlers[scent_id] = handler
             return
+
+        self._sse_handlers[scent_id] = handler
 
         # Tell server we want this scent's triggers
         await self._rpc("sbp/subscribe", {"scent_id": scent_id})
@@ -420,7 +426,7 @@ class AsyncSbpClient:
             del self._sse_handlers[scent_id]
 
         if self.local and self._local_blackboard:
-            self._local_blackboard.unsubscribe(scent_id)
+            self._local_blackboard.unsubscribe(scent_id, agent_id=self.agent_id)
             return
 
         await self._rpc("sbp/unsubscribe", {"scent_id": scent_id})
@@ -572,7 +578,7 @@ class SbpClient:
         condition: ScentCondition,
         *,
         agent_endpoint: str | None = None,
-        cooldown_ms: int = 0,
+        cooldown_ms: int = 1000,
         activation_payload: dict[str, Any] | None = None,
         hysteresis: float = 0,
     ) -> RegisterScentResult:

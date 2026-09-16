@@ -310,7 +310,7 @@ class TestScentConditions:
             triggered.append(p)
 
         r = await agent.register_scent(
-            "threshold-basic",
+            "conformance-test-agent:threshold-basic",
             {
                 "type": "threshold",
                 "trail": "scent.basic",
@@ -321,9 +321,9 @@ class TestScentConditions:
             },
             cooldown_ms=0,
         )
-        assert r.scent_id == "threshold-basic"
+        assert r.scent_id == "conformance-test-agent:threshold-basic"
         assert r.status == "registered"
-        await agent.subscribe("threshold-basic", handler)
+        await agent.subscribe("conformance-test-agent:threshold-basic", handler)
 
         await agent.emit("scent.basic", "sig", 0.8, decay=ImmortalDecay(), merge_strategy="new")
         result = await wait_until(lambda: len(triggered) > 0)
@@ -458,7 +458,7 @@ class TestTriggerDelivery:
             captured.append(p)
 
         await agent.register_scent(
-            "trigger-shape",
+            "conformance-test-agent:trigger-shape",
             {
                 "type": "threshold", "trail": "trig.shape", "signal_type": "sig",
                 "aggregation": "max", "operator": ">=", "value": 0.5,
@@ -466,13 +466,13 @@ class TestTriggerDelivery:
             cooldown_ms=0,
             activation_payload={"urgency": "high"},
         )
-        await agent.subscribe("trigger-shape", handler)
+        await agent.subscribe("conformance-test-agent:trigger-shape", handler)
         await agent.emit("trig.shape", "sig", 0.9, decay=ImmortalDecay(), merge_strategy="new")
         await wait_until(lambda: len(captured) > 0)
 
         assert captured, "expected at least one trigger to be delivered"
         payload = captured[0]
-        assert payload.scent_id == "trigger-shape"
+        assert payload.scent_id == "conformance-test-agent:trigger-shape"
         assert isinstance(payload.triggered_at, int)
         assert isinstance(payload.condition_snapshot, dict)
         assert isinstance(payload.context_pheromones, list)
@@ -493,6 +493,8 @@ class TestTriggerDelivery:
                 "aggregation": "any", "operator": ">=", "value": 0.1,
             },
             cooldown_ms=300,
+            # pinned: a steady-true condition gives edge_rising no second edge to fire on
+            trigger_mode="level",
         )
         await agent.subscribe("cooldown-test", handler)
         await agent.emit("cd", "ping", 0.8, decay=ImmortalDecay(), merge_strategy="new")
@@ -536,32 +538,65 @@ class TestTriggerDelivery:
         await asyncio.sleep(0.25)
         assert len(triggered) == 1
 
-    async def test_level_triggering_is_the_default_mode(self, agent):
-        """Spec 7.4: 'SBP MUST use level triggering by default: triggers fire when
-        conditions become true.' With cooldown_ms=0 and a condition that stays
-        true, level mode (unlike edge_rising) keeps firing on each re-evaluation."""
+    async def test_edge_triggering_is_the_default_mode(self, agent):
+        """Spec 7.4: 'SBP MUST use edge triggering by default: trigger_mode
+        defaults to edge_rising, firing only when the condition crosses the
+        threshold upward.' With cooldown_ms=0 and a condition that stays true,
+        the default must NOT refire on each re-evaluation (the old level
+        default would have)."""
         triggered = []
 
         async def handler(p):
             triggered.append(p)
 
         await agent.register_scent(
-            "level-default-test",
+            "edge-default-test",
             {
-                "type": "threshold", "trail": "level", "signal_type": "sig",
+                "type": "threshold", "trail": "edge-default", "signal_type": "sig",
                 "aggregation": "any", "operator": ">=", "value": 0.5,
             },
             cooldown_ms=0,
-            # trigger_mode omitted -- spec says default MUST be level
+            # trigger_mode omitted -- spec 7.4 says the default MUST be edge_rising
         )
-        await agent.subscribe("level-default-test", handler)
-        await agent.emit("level", "sig", 0.8, decay=ImmortalDecay(), merge_strategy="new")
+        await agent.subscribe("edge-default-test", handler)
+        await agent.emit("edge-default", "sig", 0.8, decay=ImmortalDecay(), merge_strategy="new")
         await wait_until(lambda: len(triggered) >= 1)
         first = len(triggered)
+        assert first >= 1, "the rising edge itself should have fired"
+        await asyncio.sleep(0.2)
+        assert len(triggered) == first, (
+            "edge_rising (the spec-mandated default) must fire only on the "
+            "rising edge, not on every re-evaluation while the condition stays true"
+        )
+
+    async def test_level_mode_still_available_when_explicit(self, agent):
+        """Spec 7.4: 'Level triggering remains available via "level": triggers
+        fire when conditions become true.' With cooldown_ms=0 and a condition
+        that stays true, explicitly-opted-in level mode keeps firing on each
+        re-evaluation."""
+        triggered = []
+
+        async def handler(p):
+            triggered.append(p)
+
+        await agent.register_scent(
+            "level-explicit-test",
+            {
+                "type": "threshold", "trail": "level-explicit", "signal_type": "sig",
+                "aggregation": "any", "operator": ">=", "value": 0.5,
+            },
+            cooldown_ms=0,
+            trigger_mode="level",
+        )
+        await agent.subscribe("level-explicit-test", handler)
+        await agent.emit("level-explicit", "sig", 0.8, decay=ImmortalDecay(), merge_strategy="new")
+        await wait_until(lambda: len(triggered) >= 1)
+        first = len(triggered)
+        assert first >= 1
         await asyncio.sleep(0.2)
         assert len(triggered) > first, (
-            "level triggering (the spec-mandated default) should keep firing "
-            "while the condition remains true and cooldown is 0"
+            "explicit level mode should keep firing while the condition "
+            "remains true and cooldown is 0"
         )
 
     async def test_register_scent_supports_hysteresis_per_spec(self, agent):
@@ -585,14 +620,14 @@ class TestTriggerDelivery:
 class TestDeregisterScent:
     async def test_deregister_existing_scent(self, agent):
         await agent.register_scent(
-            "to-remove",
+            "conformance-test-agent:to-remove",
             {
                 "type": "threshold", "trail": "dereg", "signal_type": "x",
                 "aggregation": "any", "operator": ">=", "value": 0.1,
             },
         )
-        r = await agent.deregister_scent("to-remove")
-        assert r.scent_id == "to-remove"
+        r = await agent.deregister_scent("conformance-test-agent:to-remove")
+        assert r.scent_id == "conformance-test-agent:to-remove"
         assert r.status == "deregistered"
 
     async def test_deregister_unknown_scent_reports_not_found(self, agent):

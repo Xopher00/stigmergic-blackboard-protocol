@@ -24,10 +24,10 @@ See how easy it is to upgrade a standard LangChain agent to an SBP-enabled agent
     reachable, gated per-worker by `sbp_ops`: `emit` (with `tags`/`merge_strategy`,
     free-form `payload`), `sniff` (with `types`/`limit`/`include_evaporated`), `inscribe`
     (with `tags`), `read` (with `keys`/`prefix`/`limit`), `erase` (with `older_than_ms`),
-    and three opt-in extras not on by default — `evaporate` (force-remove stale signals
-    now instead of waiting for decay), `inspect` (a snapshot of overall blackboard
-    state), and `register_scent`/`deregister_scent` (start/stop watching a *new*
-    condition live while already running, not just what was declared at construction).
+    and two opt-in extras not on by default — `evaporate` (force-remove stale signals
+    now instead of waiting for decay), and `register_scent`/`deregister_scent`
+    (start/stop watching a *new* condition live while already running, not just what
+    was declared at construction).
 *   **`complex_demo.py`**: A fully scent-driven architecture — neither agent is ever
     called directly:
     1.  A **Researcher** (`SbpWorker`) wakes on `research/requested`, finds a fact, and
@@ -54,8 +54,8 @@ scratch:
 3.  Decide the *minimal* `sbp_ops`/`allowed_trails` it actually needs — not everything
     "just in case"; an unused tool with no clear purpose is a real way to confuse an
     agent into looping. Default is `emit`/`sniff`/`inscribe`/`read`; add `erase`,
-    `evaporate`, `inspect`, `register_scent`/`deregister_scent` only when the agent
-    genuinely needs them.
+    `evaporate`, `register_scent`/`deregister_scent` only when the agent genuinely
+    needs them.
 4.  Add any non-SBP `tools` it needs (file I/O, web search, etc. — plain LangChain
     tools; `SbpWorker` merges them with its SBP tools into one list, same as
     `create_agent(tools=...)` already expects). Optionally set `default_decay` if this
