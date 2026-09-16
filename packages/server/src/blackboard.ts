@@ -73,6 +73,7 @@ export class Blackboard {
   private emissionHistory: Array<{ trail: string; type: string; timestamp: number }> = [];
   private evaluationTimer: ReturnType<typeof setInterval> | null = null;
   private startTime = Date.now();
+  private pendingDispatches: Set<Promise<void>> = new Set();
 
   private options: Omit<Required<BlackboardOptions>, "store" | "traceStore">;
 
@@ -488,10 +489,15 @@ export class Blackboard {
   /**
    * Stop the background evaluation loop
    */
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.evaluationTimer) {
       clearInterval(this.evaluationTimer);
       this.evaluationTimer = null;
+    }
+
+    // Drain fire-and-forget dispatches so they don't outlive this instance.
+    if (this.pendingDispatches.size > 0) {
+      await Promise.allSettled([...this.pendingDispatches]);
     }
   }
 
@@ -520,7 +526,12 @@ export class Blackboard {
 
       if (shouldTrigger) {
         scent.last_triggered_at = now;
-        await this.dispatchTrigger(scent, evalResult, now);
+        // Fire-and-forget: a slow/blocked handler for this scent must not
+        // delay trigger delivery to other scents in this loop.
+        const dispatchPromise = this.dispatchTrigger(scent, evalResult, now).finally(() => {
+          this.pendingDispatches.delete(dispatchPromise);
+        });
+        this.pendingDispatches.add(dispatchPromise);
       }
     }
   }
