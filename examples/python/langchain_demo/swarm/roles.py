@@ -27,6 +27,14 @@ from swarm.board import DecayProfile
 from swarm.corpus import Corpus
 from swarm.scoring import suggest_next_files
 
+# Free-text kind labels drift between scouts (e.g. "..._server" vs "..._service"),
+# silently breaking the exact-match confirmation this vocabulary fixes.
+EVIDENCE_KINDS = (
+    "hardcoded_secret", "weak_crypto", "exported_component", "insecure_logging",
+    "cleartext_network", "unauthenticated_network_service", "path_traversal",
+    "debug_or_backdoor_flag", "insecure_permissions", "other",
+)
+
 
 def _emit(trail: str, type_: str, intensity: float, decay, payload: dict, source: str,
           merge_strategy: str = "reinforce") -> str:
@@ -150,18 +158,23 @@ def _scout_tools(
     @tool
     def report_evidence(kind: str) -> str:
         """Report something genuinely suspicious found in your currently-claimed
-        file (hardcoded secret, weak crypto, exported component, insecure logging,
-        cleartext network call, backup/debug flag, ...). Acts on whatever file you
-        currently hold.
+        file. Acts on whatever file you currently hold.
 
         Args:
-            kind: a short stable label for the behavior, e.g. "hardcoded_secret" --
-                use the SAME label every time you see the same kind of thing, so
-                independent reports of the same behavior can be recognized as such.
+            kind: MUST be exactly one of: hardcoded_secret, weak_crypto,
+                exported_component, insecure_logging, cleartext_network,
+                unauthenticated_network_service, path_traversal,
+                debug_or_backdoor_flag, insecure_permissions, other. Pick the
+                closest match ("other" only if truly none fit) -- using the exact
+                same label as another scout for the same behavior is what lets the
+                swarm recognize independent confirmation; free-text labels break
+                that silently.
         """
         held = _my_claimed_file(scout_id, profile)
         if held is None:
             return "you hold no claim right now -- call claim_file first"
+        if kind not in EVIDENCE_KINDS:
+            return f"invalid kind {kind!r} -- must be exactly one of: {', '.join(EVIDENCE_KINDS)}"
         return _emit(board.TRAIL_EVIDENCE, kind, 0.8, profile.evidence, {"file": held, "kind": kind}, scout_id)
 
     @tool

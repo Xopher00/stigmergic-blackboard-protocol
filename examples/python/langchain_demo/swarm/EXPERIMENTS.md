@@ -113,3 +113,54 @@ failed ones. Scripted-mode development runs don't need an entry.
   the same permanent jam until the underlying bug was fixed.
 - **VERDICT**: failed -- do not reuse mark_covered/report_evidence with a
   model-supplied path argument. Re-test with the no-argument versions.
+
+### 2026-09-18 — Amaze File Manager, fileoperations/ (18 files), validation attempt 2
+
+- **Variables**: same as attempt 1, with the claim-consistency fix applied.
+- **Outcome**: ended_by=budget at 870,067 tokens (600k cap + a little overrun before
+  the halt propagated), 119s, all 18 files touched. No crash was permanent -- every
+  scout that hit recursion_limit=22 recovered cleanly on its next activation
+  (confirmed in the trace: scout-4 got refused with an ACCURATE "you already hold a
+  claim on filesystem/StorageNaming.java" message and released it correctly next
+  turn, instead of jamming forever).
+- **Findings**: scout-1 found two credible, correctly-attributed issues in
+  `filesystem/cloud/CloudStreamServer.java` -- an unauthenticated embedded
+  NanoHTTPD-style network server, and insecure logging. Not yet promoted to the
+  dossier when the budget cut off (bloodhound hadn't caught up), so the judge
+  correctly wrote an honest "no verified findings" report rather than overclaiming.
+- **Token economics**: ~48k tokens/file for the scan phase, vs. ~180k/file in the
+  broken attempt -- roughly a 4x improvement from the claim-consistency fix +
+  grep_file/read_lines + tighter recursion_limit together. Full 521-file corpus
+  scan-only at this rate would be ~25M tokens -- large but no longer absurd.
+- **What worked**: recovery, claim correctness, evidence attribution, honest
+  incomplete reporting under budget pressure.
+- **What didn't**: 600k tokens covers the scan but not enough headroom left for
+  bloodhound to confirm + judge to synthesize. Needs a larger budget, not a
+  mechanism fix.
+- **VERDICT**: worked -- mechanism is sound. Re-run same corpus with a larger budget
+  to get a full confirm-and-report cycle before scaling to the comparison matrix.
+
+### 2026-09-18 — Amaze File Manager, fileoperations/ (18 files), 2.5M budget
+
+- **Variables**: same 4-scout mix, budget raised 600k -> 2.5M, timeout 900s.
+- **Outcome**: STILL ended_by=budget, 2,531,482 tokens, 380s. 15/18 distinct files
+  claimed (genuine progress, not a re-processing loop -- verified by extracting
+  distinct claim_file paths from the trace). ~28+ recoverable crashes over the run.
+  Judge again wrote an honest "no verified findings" report.
+- **Root cause -- the real bottleneck, not budget**: `report_evidence`'s kind
+  argument is free text. Across the two fileoperations runs, the SAME real
+  finding (an unauthenticated embedded HTTP server) got reported as
+  "unauthenticated_network_server" in one run and "unauthenticated_network_service"
+  in the other -- different scouts, different sessions, both plausible labels for
+  the same thing. Bloodhound's confirmation requires an EXACT string match across
+  two independent files' evidence. Label drift silently makes confirmation
+  unreachable regardless of how much budget or coverage the swarm gets. 4x the
+  budget didn't fix this because it was never the bottleneck.
+- **Fix**: `report_evidence` now enforces a fixed 10-value vocabulary
+  (EVIDENCE_KINDS in roles.py) -- any other string is rejected with the exact
+  allowed list, not silently accepted. Also fixed the revive task blindly re-poking
+  scouts forever even after all files were covered (it could not distinguish
+  "stalled" from "legitimately done") -- it now checks real coverage first via
+  `_all_files_covered` and stops reviving once nothing is left to do.
+- **VERDICT**: failed to reach a confirm-and-report cycle, but correctly diagnosed
+  why -- not a budget problem. Re-test with the vocabulary fix before spending more.

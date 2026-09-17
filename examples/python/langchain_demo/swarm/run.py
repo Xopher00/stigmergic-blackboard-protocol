@@ -28,17 +28,29 @@ from swarm.report import write_run_summary
 from swarm.scripted import bloodhound_model, judge_model, scout_model, write_scripted_corpus
 
 
-async def _revive_stalled_scouts(scouts, profile: DecayProfile, interval_s: float = 8.0) -> None:
+def _all_files_covered(bb, corpus: Corpus) -> bool:
+    from sbp.types import SniffParams
+    covered = bb.sniff(SniffParams(trails=[roles.board.TRAIL_COVERAGE], types=[roles.board.TYPE_FILE]))
+    seen = {p.payload.get("file") for p in covered.pheromones}
+    return set(corpus.files) <= seen
+
+
+async def _revive_stalled_scouts(
+    scouts, profile: DecayProfile, corpus: Corpus, interval_s: float = 8.0,
+) -> None:
     """A crashed activation (e.g. GraphRecursionError) never calls continue_watching,
     so the scout would otherwise sit dead forever. Re-poke any idle scout on an
-    interval -- cheap when nothing is actually stalled (it just repeats a no-op
-    "no unclaimed files" turn), and it's what makes a crash a setback, not a loss."""
+    interval -- but never once every file is covered, since active_activations==0
+    then means "legitimately done," not "stalled," and re-poking would just spend
+    tokens re-discovering that repeatedly for no benefit."""
     bb = get_shared_blackboard()
     while True:
         await asyncio.sleep(interval_s)
+        if _all_files_covered(bb, corpus):
+            continue
         for s in scouts:
             if s.active_activations == 0:
-                await bb.evaluate_scents()  # let a swallowed edge settle before poking
+                await bb.evaluate_scents()
                 wake = roles.board.wake_trail(s.agent_id)
                 bb.emit(EmitParams(trail=wake, type=roles.board.TYPE_WAKE, intensity=1.0,
                                     decay=profile.wake, source_agent="revive-supervisor"))
@@ -69,7 +81,7 @@ async def _run_swarm(
     observer_task = asyncio.create_task(observer.run())
     heartbeat_tasks = [asyncio.create_task(roles.claim_heartbeat(s, profile)) for s in scouts]
     # Off for scripted mode: an unplanned extra wake desyncs its fixed-length script.
-    revive_task = asyncio.create_task(_revive_stalled_scouts(scouts, profile)) if enable_revive else None
+    revive_task = asyncio.create_task(_revive_stalled_scouts(scouts, profile, corpus)) if enable_revive else None
 
     sampler_stop = asyncio.Event()
     sampler_task = asyncio.create_task(run_attention_sampler(bb, 0.2, sampler_stop))
