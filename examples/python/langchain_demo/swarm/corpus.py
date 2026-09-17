@@ -19,6 +19,24 @@ class Corpus:
             raise ValueError(f"not in corpus: {path}")
         return (self.root / path).read_text(errors="replace")
 
+    def read_lines(self, path: str, start: int, end: int) -> str:
+        lines = self.read(path).splitlines()
+        start = max(1, start)
+        end = min(len(lines), end)
+        return "\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1))
+
+    def grep(self, path: str, pattern: str, context: int = 1) -> str:
+        import re
+        lines = self.read(path).splitlines()
+        rx = re.compile(pattern)
+        hits = [i for i, line in enumerate(lines) if rx.search(line)]
+        if not hits:
+            return f"no match for {pattern!r} in {path}"
+        shown: set[int] = set()
+        for h in hits:
+            shown.update(range(max(0, h - context), min(len(lines), h + context + 1)))
+        return "\n".join(f"{i + 1}: {lines[i]}" for i in sorted(shown))
+
 
 def load_corpus(
     root: str | Path,

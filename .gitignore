@@ -43,4 +43,5 @@ RELEASE_NOTES.md
 # Swarm experiment: downloaded binaries, decompiled corpus, run output
 examples/python/langchain_demo/swarm/.tools/
 examples/python/langchain_demo/swarm/corpus/
+examples/python/langchain_demo/swarm/corpus_amaze/
 examples/python/langchain_demo/swarm/out/
