@@ -237,6 +237,9 @@ def build_scout(
     )
 
 
+BLOODHOUND_ID = "bloodhound"
+
+
 def _bloodhound_tools(corpus: Corpus, profile: DecayProfile) -> list:
     @tool
     def mark_hot(dir_path: str, kind: str, intensity: float) -> str:
@@ -247,7 +250,7 @@ def _bloodhound_tools(corpus: Corpus, profile: DecayProfile) -> list:
             kind: the confirmed behavior's label, matching report_evidence's kind.
             intensity: 0.0-1.0, derived from how many independent files confirm it.
         """
-        return _emit(board.TRAIL_HOT, dir_path, intensity, profile.hot, {"kind": kind}, "bloodhound")
+        return _emit(board.TRAIL_HOT, dir_path, intensity, profile.hot, {"kind": kind}, BLOODHOUND_ID)
 
     @tool
     def ask_question(topic: str) -> str:
@@ -256,34 +259,51 @@ def _bloodhound_tools(corpus: Corpus, profile: DecayProfile) -> list:
         Args:
             topic: short stable label scouts can watch, e.g. "check_util_logging".
         """
-        return _emit(board.TRAIL_QUESTIONS, topic, 0.6, profile.question, {"topic": topic}, "bloodhound")
+        return _emit(board.TRAIL_QUESTIONS, topic, 0.6, profile.question, {"topic": topic}, BLOODHOUND_ID)
 
-    return [*_reader_tools(corpus), mark_hot, ask_question]
+    @tool
+    async def keep_watching() -> str:
+        """Call this once, last, at the end of every activation. The evidence trail
+        only wakes you on its very first rising edge -- once anything is on it, the
+        aggregate never dips back down for a second edge, so later independent
+        confirmations would otherwise never wake you again. This re-arms your own
+        periodic check so you keep re-examining the evidence trail."""
+        await asyncio.sleep(1.05)
+        return _emit(board.wake_trail(BLOODHOUND_ID), board.TYPE_WAKE, 1.0, profile.wake, {}, BLOODHOUND_ID)
+
+    return [*_reader_tools(corpus), mark_hot, ask_question, keep_watching]
 
 
 BLOODHOUND_SBP_OPS = ("sniff", "inscribe", "read")
-BLOODHOUND_SYSTEM_PROMPT = """You are the bloodhound. You wake whenever a scout \
-reports evidence. Read the reported code yourself before deciding anything -- never \
-promote a finding you have not read.
+BLOODHOUND_SYSTEM_PROMPT = """You are the bloodhound. You wake periodically to check \
+the evidence trail. Read the reported code yourself before deciding anything -- \
+never promote a finding you have not read.
 
 sbp_sniff(trails=['{evidence}']) to see all current evidence, grouped by its 'kind'. \
 Mark an area hot with mark_hot ONLY when the same kind of evidence appears in two or \
 more DIFFERENT files (independent confirmation) -- one scout's alarm alone is not \
-enough. For a confirmed kind, read_file each reporting file yourself, then \
-sbp_inscribe(trail='{dossier}', key=<dir>, value={{'files': [...], 'kind': kind, \
-'summary': ...}}) and mark_hot(dir, kind, intensity). You may ask_question to point \
-scouts at something specific worth checking."""
+enough, and you may see a kind you already promoted again -- skip anything you have \
+already inscribed to {dossier}. For a newly-confirmed kind, read_file each reporting \
+file yourself, then sbp_inscribe(trail='{dossier}', key=<dir>, value={{'files': \
+[...], 'kind': kind, 'summary': ...}}) and mark_hot(dir, kind, intensity). You may \
+ask_question to point scouts at something specific worth checking. Always end your \
+turn with EXACTLY ONE call to keep_watching, whether or not you found anything new \
+this time -- that is what keeps you checking back."""
 
 
 def build_bloodhound(model: BaseChatModel, corpus: Corpus, profile: DecayProfile, middleware=()) -> SbpWorker:
     prompt = BLOODHOUND_SYSTEM_PROMPT.format(evidence=board.TRAIL_EVIDENCE, dossier=board.TRAIL_DOSSIER)
-    condition = and_(threshold(board.TRAIL_EVIDENCE, "*", ">=", 0.5), _not_halted())
+    wake = board.wake_trail(BLOODHOUND_ID)
+    condition = and_(
+        or_(threshold(board.TRAIL_EVIDENCE, "*", ">=", 0.5), threshold(wake, board.TYPE_WAKE, ">=", 0.5)),
+        _not_halted(),
+    )
     return SbpWorker(
-        "bloodhound", model, prompt,
+        BLOODHOUND_ID, model, prompt,
         listens_for=condition,
         tools=_bloodhound_tools(corpus, profile),
         sbp_ops=BLOODHOUND_SBP_OPS,
-        allowed_trails=[*board.BLOODHOUND_TRAILS],
+        allowed_trails=[*board.BLOODHOUND_TRAILS, wake],
         middleware=middleware,
         recursion_limit=45,
     )

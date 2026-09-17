@@ -164,3 +164,36 @@ failed ones. Scripted-mode development runs don't need an entry.
   `_all_files_covered` and stops reviving once nothing is left to do.
 - **VERDICT**: failed to reach a confirm-and-report cycle, but correctly diagnosed
   why -- not a budget problem. Re-test with the vocabulary fix before spending more.
+
+### 2026-09-18 — Amaze File Manager, fileoperations/ (18 files), vocabulary fix live
+
+- **Variables**: same 4-scout mix, 2.5M budget, with the evidence vocabulary fix.
+- **Outcome**: STILL ended_by=budget, 2,669,496 tokens, 380s. Judge again wrote "no
+  verified findings."
+- **Root cause -- the actual structural bug, found by reading the full trace**: the
+  vocabulary fix worked (both an unauthenticated-server report on
+  `filesystem/smbstreamer/StreamServer.java` AND a second, independently-labeled
+  match on `filesystem/cloud/CloudStreamServer.java` used the EXACT SAME kind,
+  `unauthenticated_network_service`) -- real, independent confirmation genuinely
+  existed on the board. But bloodhound never saw it: its `listens_for` was
+  `threshold(TRAIL_EVIDENCE, "*", ">=", 0.5)` with edge_rising and no hysteresis.
+  Once the FIRST piece of evidence ever appears, the trail-wide aggregate stays
+  above 0.5 continuously (evidence keeps arriving faster than any one report
+  decays), so the aggregate never dips back down for edge_rising to see a SECOND
+  edge. Bloodhound woke exactly once, saw 1 report, correctly declined, and then
+  slept for the rest of the run no matter how much later, independently-confirming
+  evidence arrived. This is why raising the budget never helped in any prior
+  attempt -- bloodhound was asleep, not starved.
+- **Fix**: gave bloodhound the same self-looping wake pattern already proven to
+  work for scouts -- its own decaying wake pheromone, a `keep_watching` tool it
+  calls once at the end of every activation, and `listens_for` changed to
+  `or_(evidence-edge, own-wake-edge)` so the first evidence event still wakes it
+  immediately, but it now also re-checks the evidence trail periodically
+  afterward instead of going permanently dormant.
+- **Known follow-on cost**: bloodhound now polls indefinitely for the rest of the
+  run (there is no signal telling it "nothing left to discover"), which spends
+  some budget on empty re-checks after coverage is done. Not fixed yet -- worth a
+  cheap follow-up (e.g. stop re-arming once coverage is complete and evidence has
+  been stable for N checks), but not blocking.
+- **VERDICT**: unknown -- the fix is right by trace analysis but not yet re-run
+  live. Re-test before trusting.
