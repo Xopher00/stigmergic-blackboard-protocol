@@ -276,3 +276,38 @@ failed ones. Scripted-mode development runs don't need an entry.
 - **VERDICT**: worked as a structural fix (scripted mode + regression verified
   green with the extra grace period and re-invocation); not yet proven to
   actually close a confirmation live. Next live run is the real test.
+
+### 2026-09-18 — fileoperations/, grace period + judge re-invocation, live: SUCCESS
+
+- **Variables**: 4 scouts (2x glm-5.3-flash, 2x qwen3-30b-a3b), bloodhound
+  gemini-2.5-flash, judge claude-haiku-4.5, budget 5M, timeout 1200s, seed 14.
+- **Command**:
+  ```
+  python -m swarm.run --mode live --force --out swarm/out/run1_mixed_confirmed \
+    --source swarm/corpus_amaze/sources/com/amaze/filemanager/fileoperations \
+    --scout-models z-ai/glm-5.3-flash z-ai/glm-5.3-flash qwen/qwen3-30b-a3b qwen/qwen3-30b-a3b \
+    --bloodhound-model google/gemini-2.5-flash --judge-model anthropic/claude-haiku-4.5 \
+    --timeout-s 1200 --budget-tokens 5000000 --seed 14
+  ```
+  Artifacts preserved in `swarm/out/run1_mixed_confirmed/` (report.md,
+  run_summary.json, journal.jsonl -- 13,328 lines).
+- **Outcome**: ended_by=**natural**, 2,762,641 tokens (well under the 5M cap),
+  980s (~16.3 min). Full 18/18 file coverage.
+- **Findings -- two independently confirmed, cross-referenced, ranked**:
+  1. `filesystem/smbstreamer/StreamServer.java` -- unauthenticated embedded
+     network service, attention integral 241.221.
+  2. `filesystem/cloud/CloudStreamServer.java` -- unauthenticated embedded
+     network service, attention integral 241.220.
+  Both are real: Amaze File Manager genuinely embeds NanoHTTPD-derived local
+  HTTP servers for SMB and cloud file streaming with no authentication on the
+  request handler -- a plausible, credible class of finding for a file manager
+  app, independently spotted by different scouts in different files and
+  correctly promoted only once two independent files agreed on the same
+  evidence kind.
+- **What worked**: the full pipeline, end to end, for the first time across ~10
+  attempts -- claim gate, evidence vocabulary, bloodhound self-watch (separately
+  registered scent), grace period, judge re-invocation, natural end detection,
+  attention-integral ranking, honest confirmed-vs-hypothesis labeling.
+- **VERDICT**: worked. This is the reference-quality run -- reuse this exact
+  configuration (or the same shape with different models) for the comparison
+  matrix.
