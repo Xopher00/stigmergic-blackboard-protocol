@@ -17,7 +17,7 @@ import sbp.blackboard as blackboard_module
 from sbp.agent import SbpAgent
 from sbp.blackboard import LocalBlackboard, get_shared_blackboard
 from sbp.client import AsyncSbpClient
-from sbp.types import EmitParams
+from sbp.types import EmitParams, TriggerPayload
 
 from swarm import roles
 from swarm.attention import run_attention_sampler
@@ -97,6 +97,13 @@ async def _run_swarm(
                                   decay=profile.wake, payload={})
         try:
             await asyncio.wait_for(done.wait(), timeout=timeout_s)
+            # Give bloodhound one more self-watch window, then re-invoke the judge
+            # directly (write_report overwrites) so its report isn't stale.
+            await asyncio.sleep(15)
+            await judge_worker._on_trigger(TriggerPayload(
+                scent_id="supervisor:final-report", triggered_at=0,
+                condition_snapshot={}, context_pheromones=[], activation_payload={},
+            ))
         except asyncio.TimeoutError:
             ended_by = "timeout"
         if budget.tripped and not done.is_set():

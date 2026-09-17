@@ -234,3 +234,45 @@ failed ones. Scripted-mode development runs don't need an entry.
   independently enforced by a tool yet.
 - **VERDICT**: worked mechanically (verified: scripted mode green, regression
   green) but not yet proven live. Re-test before trusting.
+
+### 2026-09-18 — fileoperations/, corrected bloodhound self-watch, live (take 1)
+
+- **Variables**: same 4-scout mix, budget 2.5M, timeout 900s.
+- **Outcome**: ended_by=budget, 2,786,154 tokens, 444s. Still zero confirmed
+  findings -- BUT the trace proves the mechanism is now fully correct: bloodhound
+  triggered 3 real times (once on the evidence edge, twice via its own registered
+  self-watch scent), correctly sniffing and correctly declining each time because,
+  at each check, all evidence still came from one file. Full coverage (18/18
+  files) was reached this run.
+- **Root cause -- now purely a timing/budget-margin issue, not a mechanism bug**:
+  a second, genuinely independent confirming report (from a completely different
+  file, exact matching kind `unauthenticated_network_service`) DID arrive on the
+  board later in the run, but AFTER bloodhound's last check and before its next
+  self-watch cycle could land -- the budget cap tripped in between. Verified by
+  comparing log line numbers of bloodhound's checks against the evidence
+  emissions' line numbers directly.
+- **VERDICT**: worked (mechanism proven correct via 3 real independent triggers
+  with correct judgment each time) but the specific run still landed just short of
+  confirmation on timing. Larger budget should be pure margin now, not a new fix.
+
+### 2026-09-18 — fileoperations/, same fix, 5M budget (take 2)
+
+- **Variables**: same 4-scout mix, budget raised to 5M, timeout 1200s.
+- **Outcome**: ended_by=**natural** (not budget or timeout) -- the swarm reached
+  its own end condition for the first time across every attempt. Still zero
+  confirmed findings in the final report, but for a NEW, different reason: two
+  independently-confirming evidence reports existed on the board (verified via
+  event counts), yet bloodhound's last check happened before the second one
+  arrived, and the whole run's "coverage done + no claims + no hot" end condition
+  became true and tore everything down (including the judge, which fires off
+  essentially the same condition) before bloodhound's next self-watch cycle had a
+  chance to process it. "No hot" is trivially true the instant nothing has been
+  promoted YET, not only when there is genuinely nothing left to find -- so a
+  fully "clean" natural end can race ahead of an in-progress confirmation.
+- **Fix**: after the natural-end signal fires, wait a 15s grace period (letting
+  bloodhound's pending self-watch cycle run), then explicitly re-invoke the judge
+  directly (bypassing its own scent, which already fired) so `write_report`
+  overwrites the earlier, now-stale report with the final board state.
+- **VERDICT**: worked as a structural fix (scripted mode + regression verified
+  green with the extra grace period and re-invocation); not yet proven to
+  actually close a confirmation live. Next live run is the real test.
