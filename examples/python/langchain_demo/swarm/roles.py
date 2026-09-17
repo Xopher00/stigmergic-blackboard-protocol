@@ -263,20 +263,19 @@ def _bloodhound_tools(corpus: Corpus, profile: DecayProfile) -> list:
 
     @tool
     async def keep_watching() -> str:
-        """Call this once, last, at the end of every activation. The evidence trail
-        only wakes you on its very first rising edge -- once anything is on it, the
-        aggregate never dips back down for a second edge, so later independent
-        confirmations would otherwise never wake you again. This re-arms your own
-        periodic check so you keep re-examining the evidence trail."""
+        """Call this once, last, at the end of every activation, right after
+        sbp_register_scent. Reinforces the wake signal your self-watch scent
+        listens for."""
         await asyncio.sleep(1.05)
         return _emit(board.wake_trail(BLOODHOUND_ID), board.TYPE_WAKE, 1.0, profile.wake, {}, BLOODHOUND_ID)
 
     return [*_reader_tools(corpus), mark_hot, ask_question, keep_watching]
 
 
-BLOODHOUND_SBP_OPS = ("sniff", "inscribe", "read")
-BLOODHOUND_SYSTEM_PROMPT = """You are the bloodhound. You wake periodically to check \
-the evidence trail. Read the reported code yourself before deciding anything -- \
+BLOODHOUND_SBP_OPS = ("sniff", "inscribe", "read", "register_scent")
+BLOODHOUND_SELF_WATCH_ID = "watch-self"
+BLOODHOUND_SYSTEM_PROMPT = """You are the bloodhound. You wake whenever a scout \
+reports evidence. Read the reported code yourself before deciding anything -- \
 never promote a finding you have not read.
 
 sbp_sniff(trails=['{evidence}']) to see all current evidence, grouped by its 'kind'. \
@@ -286,18 +285,22 @@ enough, and you may see a kind you already promoted again -- skip anything you h
 already inscribed to {dossier}. For a newly-confirmed kind, read_file each reporting \
 file yourself, then sbp_inscribe(trail='{dossier}', key=<dir>, value={{'files': \
 [...], 'kind': kind, 'summary': ...}}) and mark_hot(dir, kind, intensity). You may \
-ask_question to point scouts at something specific worth checking. Always end your \
-turn with EXACTLY ONE call to keep_watching, whether or not you found anything new \
-this time -- that is what keeps you checking back."""
+ask_question to point scouts at something specific worth checking.
+
+The evidence trail only wakes you on its first rising edge -- once anything is on \
+it, later independent confirmations would not wake you again on their own. So at \
+the END of every activation, ALWAYS call sbp_register_scent(scent_id='{self_watch}', \
+trail='{wake}', signal_type='wake', value=0.5, cooldown_ms=0) (harmless to repeat, \
+it just refreshes the watch) followed by keep_watching -- that is what keeps you \
+checking back even when no new evidence has arrived on its own."""
 
 
 def build_bloodhound(model: BaseChatModel, corpus: Corpus, profile: DecayProfile, middleware=()) -> SbpWorker:
-    prompt = BLOODHOUND_SYSTEM_PROMPT.format(evidence=board.TRAIL_EVIDENCE, dossier=board.TRAIL_DOSSIER)
     wake = board.wake_trail(BLOODHOUND_ID)
-    condition = and_(
-        or_(threshold(board.TRAIL_EVIDENCE, "*", ">=", 0.5), threshold(wake, board.TYPE_WAKE, ">=", 0.5)),
-        _not_halted(),
-    )
+    prompt = BLOODHOUND_SYSTEM_PROMPT.format(evidence=board.TRAIL_EVIDENCE, dossier=board.TRAIL_DOSSIER,
+                                              self_watch=BLOODHOUND_SELF_WATCH_ID, wake=wake)
+    # Registered self-watch scent re-triggers afterward, with its own edge tracking.
+    condition = and_(threshold(board.TRAIL_EVIDENCE, "*", ">=", 0.5), _not_halted())
     return SbpWorker(
         BLOODHOUND_ID, model, prompt,
         listens_for=condition,

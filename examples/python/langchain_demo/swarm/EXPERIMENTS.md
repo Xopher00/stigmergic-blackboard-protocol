@@ -195,5 +195,42 @@ failed ones. Scripted-mode development runs don't need an entry.
   some budget on empty re-checks after coverage is done. Not fixed yet -- worth a
   cheap follow-up (e.g. stop re-arming once coverage is complete and evidence has
   been stable for N checks), but not blocking.
-- **VERDICT**: unknown -- the fix is right by trace analysis but not yet re-run
-  live. Re-test before trusting.
+- **VERDICT**: failed -- the diagnosis (bloodhound structurally asleep after its
+  first wake) was right, but the fix (OR the evidence edge with its own wake edge
+  in one composite) was wrong. See the next entry for why and the real fix.
+
+### 2026-09-18 — bloodhound self-wake fix, take 2: separate scent, not OR
+
+- **What was wrong with take 1**: OR'ing the evidence-edge condition with a
+  wake-edge condition in one composite doesn't work either. Edge tracking
+  (`last_condition_met`) is per SCENT, evaluated on the whole composite's met/
+  not-met -- not per branch. Once evidence exists, it stays present long enough
+  that the OR's overall value is continuously true, which means the wake branch's
+  own rise-and-fall is invisible to edge detection: the composite was already
+  "true" before the wake pheromone even rose, so there is no edge to see. Verified
+  live: bloodhound called keep_watching correctly, its own wake pheromone was
+  created, and it still never triggered again.
+- **Real fix**: bloodhound's `listens_for` stays exactly as originally designed
+  (evidence-edge only, unchanged) for its first wake. It now also calls
+  `sbp_register_scent` to register a SEPARATE, independently-tracked dynamic scent
+  watching its own wake trail (the same mechanism scouts already use for dynamic
+  questions) -- a genuinely different scent_id has its own last_condition_met, so
+  its edges are never masked by the construction-time scent's state. Added
+  `register_scent` to BLOODHOUND_SBP_OPS; the prompt now instructs registering (or
+  idempotently refreshing) the self-watch scent, then keep_watching, at the end of
+  every activation.
+- **Scripted-mode caveat found while fixing this**: scripted mode's bloodhound
+  does NOT need this mechanism -- its one evidence-triggered activation already
+  fully exercises confirmation, and forcing scripted.py to also call
+  register_scent/keep_watching caused its fixed message list to keep cycling back
+  and re-marking hot forever (ScriptedChatModel wraps to message 0 once
+  exhausted), which stalled the natural end condition. Reverted -- scripted mode's
+  script does not need to mirror everything the live prompt instructs.
+- **Open risk, not yet hardened**: a real model that keeps re-confirming an
+  already-dossier'd kind on every self-watch cycle (instead of skipping it, as
+  instructed) could keep `swarm.hot`'s intensity refreshed indefinitely via
+  reinforce, which would prevent the natural end condition (`not hot`) from ever
+  being satisfied. The prompt says to skip already-inscribed kinds; this is not
+  independently enforced by a tool yet.
+- **VERDICT**: worked mechanically (verified: scripted mode green, regression
+  green) but not yet proven live. Re-test before trusting.
