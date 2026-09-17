@@ -39,3 +39,8 @@ htmlcov/
 # Package locks (keep package-lock.json for npm)
 # poetry.lock
 RELEASE_NOTES.md
+
+# Swarm experiment: downloaded binaries, decompiled corpus, run output
+examples/python/langchain_demo/swarm/.tools/
+examples/python/langchain_demo/swarm/corpus/
+examples/python/langchain_demo/swarm/out/

@@ -394,7 +394,8 @@ class SbpWorker:
 
     def _log_step(self, chunk: dict[str, Any]) -> None:
         for node_update in chunk.values():
-            for msg in node_update.get("messages", []):
+            # A middleware node with no visible state diff streams as None, not {}.
+            for msg in (node_update or {}).get("messages", []):
                 for call in getattr(msg, "tool_calls", None) or []:
                     print(f"[{self.agent_id}] tool_call {call['name']}({call['args']})")
                 if type(msg).__name__ == "ToolMessage":
