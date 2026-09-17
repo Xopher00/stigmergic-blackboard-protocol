@@ -92,11 +92,14 @@ def _reader_tools(corpus: Corpus) -> list:
     return [list_candidates, grep_file, read_lines, read_file]
 
 
-def _has_live_claim(scout_id: str, profile: DecayProfile) -> bool:
+def _my_claimed_file(scout_id: str, profile: DecayProfile) -> str | None:
     mine = get_shared_blackboard().sniff(SniffParams(
         trails=[board.TRAIL_CLAIMS], types=[board.TYPE_CLAIM], min_intensity=profile.claim_live_threshold,
     ))
-    return any(p.source_agent == scout_id for p in mine.pheromones)
+    for p in mine.pheromones:
+        if p.source_agent == scout_id:
+            return p.payload.get("file")
+    return None
 
 
 def _scout_tools(
@@ -117,36 +120,49 @@ def _scout_tools(
         one claim at a time -- mark_covered releases it before you may claim another."""
         # Checked against the board so it survives a crashed activation, not just
         # local per-turn state -- real models chain through files regardless of prompt.
-        if _has_live_claim(scout_id, profile):
-            return "you already hold a claim -- call mark_covered on it, then continue_watching, before claiming another"
+        held = _my_claimed_file(scout_id, profile)
+        if held is not None:
+            return f"you already hold a claim on {held} -- call mark_covered (no argument) to release it first"
         return _emit(board.TRAIL_CLAIMS, board.TYPE_CLAIM, 1.0, profile.claim, {"file": path}, scout_id)
 
     @tool
-    def mark_visited(path: str) -> str:
-        """Mark a file as recently read, so the swarm's attention drifts elsewhere."""
-        return _emit(board.TRAIL_VISITED, board.TYPE_VISITED, 1.0, profile.visited, {"file": path}, scout_id)
+    def mark_visited() -> str:
+        """Mark your currently-claimed file as recently read, so the swarm's
+        attention drifts elsewhere. Acts on whatever file you currently hold."""
+        held = _my_claimed_file(scout_id, profile)
+        if held is None:
+            return "you hold no claim right now -- call claim_file first"
+        return _emit(board.TRAIL_VISITED, board.TYPE_VISITED, 1.0, profile.visited, {"file": held}, scout_id)
 
     @tool
-    def mark_covered(path: str) -> str:
-        """Record that this file has been fully read at least once this run, and
-        release your claim on it (other scouts may claim it again after this)."""
-        result = _emit(board.TRAIL_COVERAGE, board.TYPE_FILE, 1.0, profile.coverage, {"file": path}, scout_id)
-        _emit(board.TRAIL_CLAIMS, board.TYPE_CLAIM, 0.0, profile.claim, {"file": path}, scout_id, "replace")
+    def mark_covered() -> str:
+        """Record that your currently-claimed file has been fully read, and release
+        your claim on it (other scouts may claim it again after this). Acts on
+        whatever file you currently hold -- takes no argument, so it can never
+        release the wrong file."""
+        held = _my_claimed_file(scout_id, profile)
+        if held is None:
+            return "you hold no claim right now -- nothing to release"
+        result = _emit(board.TRAIL_COVERAGE, board.TYPE_FILE, 1.0, profile.coverage, {"file": held}, scout_id)
+        _emit(board.TRAIL_CLAIMS, board.TYPE_CLAIM, 0.0, profile.claim, {"file": held}, scout_id, "replace")
         return result
 
     @tool
-    def report_evidence(path: str, kind: str) -> str:
-        """Report something genuinely suspicious you found while reading a file
-        (hardcoded secret, weak crypto, exported component, insecure logging,
-        cleartext network call, backup/debug flag, ...).
+    def report_evidence(kind: str) -> str:
+        """Report something genuinely suspicious found in your currently-claimed
+        file (hardcoded secret, weak crypto, exported component, insecure logging,
+        cleartext network call, backup/debug flag, ...). Acts on whatever file you
+        currently hold.
 
         Args:
-            path: the file it was found in.
             kind: a short stable label for the behavior, e.g. "hardcoded_secret" --
                 use the SAME label every time you see the same kind of thing, so
                 independent reports of the same behavior can be recognized as such.
         """
-        return _emit(board.TRAIL_EVIDENCE, kind, 0.8, profile.evidence, {"file": path, "kind": kind}, scout_id)
+        held = _my_claimed_file(scout_id, profile)
+        if held is None:
+            return "you hold no claim right now -- call claim_file first"
+        return _emit(board.TRAIL_EVIDENCE, kind, 0.8, profile.evidence, {"file": held, "kind": kind}, scout_id)
 
     @tool
     async def continue_watching() -> str:

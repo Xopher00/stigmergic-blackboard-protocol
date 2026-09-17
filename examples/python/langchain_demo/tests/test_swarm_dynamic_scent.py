@@ -37,8 +37,8 @@ async def test_scout_self_registers_a_scent_gets_woken_by_it_and_cleans_up_on_st
 
     model = ScriptedChatModel(responses=[
         _call("claim_file", path="app/auth/LoginActivity.java"),
-        _call("mark_visited", path="app/auth/LoginActivity.java"),
-        _call("mark_covered", path="app/auth/LoginActivity.java"),
+        _call("mark_visited"),
+        _call("mark_covered"),
         _call("sbp_register_scent", scent_id="watch-topic", trail=board.TRAIL_QUESTIONS,
               signal_type="mytopic", value=0.5, cooldown_ms=0),
         AIMessage(content="watching"),

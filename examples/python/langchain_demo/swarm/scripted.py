@@ -68,10 +68,10 @@ def scout_model(file_plan: list[tuple[str, str | None]]) -> ScriptedChatModel:
             _call("read_file", path=path),
         ]
         if kind:
-            messages.append(_call("report_evidence", path=path, kind=kind))
+            messages.append(_call("report_evidence", kind=kind))
         messages += [
-            _call("mark_visited", path=path),
-            _call("mark_covered", path=path),
+            _call("mark_visited"),
+            _call("mark_covered"),
         ]
         if not is_last:
             messages.append(_call("continue_watching"))
