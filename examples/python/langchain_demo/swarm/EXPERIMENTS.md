@@ -311,3 +311,71 @@ failed ones. Scripted-mode development runs don't need an entry.
 - **VERDICT**: worked. This is the reference-quality run -- reuse this exact
   configuration (or the same shape with different models) for the comparison
   matrix.
+
+## Comparison matrix (2026-09-18): does model mix change the outcome?
+
+Requested by the user: run several live configurations on the SAME corpus and
+budget shape, varying which roles get cheap vs. stronger models, and record what
+actually differs. All four ran against `fileoperations/` (18 files), budget 5M
+tokens, timeout 1200s, immediately after the fixes above -- same code, same
+corpus, same seed range (14/20/21/22), launched as separate concurrent
+processes. Artifacts in `swarm/out/run{1..4}_*/`.
+
+| Run | Scouts | Bloodhound | Judge | ended_by | Tokens | Duration | Confirmed findings |
+|---|---|---|---|---|---|---|---|
+| 1 mixed | 2x glm-flash + 2x qwen3-30b | gemini-2.5-flash | claude-haiku-4.5 | natural | 2.76M | 980s | 2 (CloudStreamServer, StreamServer) |
+| 2 control | 4x glm-flash | glm-flash | glm-flash | budget | 5.34M | 1263s | 2 (same two) + 1 correctly dismissed false positive |
+| 3 judge-upgrade | 4x glm-flash | glm-flash | claude-haiku-4.5 | budget | 5.29M | 1134s | 2 (same two) |
+| 4 scout-diversity | 2x glm-flash + 2x qwen3-30b | glm-flash | glm-flash | budget | 5.38M | 834s | 2 (same two) |
+
+**Headline result: all four configurations independently reached the same
+confirmed finding** -- unauthenticated embedded HTTP servers in
+`filesystem/cloud/CloudStreamServer.java` and `filesystem/smbstreamer/
+StreamServer.java`, both binding all interfaces on the same hardcoded port 7871
+with zero authentication, including the cross-module port-takeover interaction.
+This is a real, reproducible vulnerability class in Amaze File Manager, not an
+artifact of any one model configuration.
+
+**What DID vary -- report quality and depth, not correctness**:
+- Run 2 (all-cheap control) was, unexpectedly, the most thorough report of the
+  four: it explicitly investigated and DISMISSED a false-positive cluster
+  (`exceptions/`, initially flagged by two scouts but not independently
+  replicated on inspection) and flagged its own methodological caveat
+  ("single-source provenance: all three dossier entries authored by one agent").
+  This is the mechanism's honesty guarantee visibly working at the report level,
+  not just internally.
+- Run 3 (judge upgrade only) additionally surfaced the port-stealing race
+  condition (`tryBind()` force-stopping the sibling singleton on `BindException`)
+  as its own named finding detail.
+- Run 4 (scout diversity only) explicitly reasoned about the two servers as ONE
+  compound exposure sharing infrastructure, rather than two separate items.
+- Run 1 (fully mixed) was the fastest to a natural (non-budget) end and the
+  leanest report.
+- Only run 1 ended `natural`; the other three all ran to the 5M budget cap
+  despite reaching the same confirmed conclusion well before that -- the
+  post-confirmation self-watch/claim-heartbeat/revive loops keep consuming
+  budget with no new evidence to find once everything real has been confirmed
+  (the known follow-on cost flagged earlier: nothing currently tells bloodhound
+  or the scouts "there is genuinely nothing left," only "nothing NEW right now").
+- Token spend was within a narrow band (2.76M-5.38M) and not obviously predicted
+  by which models were "stronger" -- run 1 (the most expensive model mix) used
+  the FEWEST tokens by ending naturally; run 2 (the cheapest model mix) used the
+  MOST, entirely due to the budget-cap-not-natural-end pattern above, not due to
+  the cheap models being less capable.
+
+**What this means for "does model capability matter here"**: for a corpus this
+size (18 files) and a finding this structurally obvious once independently
+sampled twice, no -- every configuration tested, including the cheapest
+all-same-family one, reliably found and correctly confirmed it. The
+differentiator that showed up was report SOPHISTICATION (false-positive
+rejection, cross-reference detail, compound-finding reasoning), which tracked
+loosely with judge strength but not perfectly (the control run's dismissal
+behavior came from bloodhound + judge working together, and bloodhound was
+glm-flash in every non-run-1 configuration). A harder or larger corpus, or one
+with a genuinely ambiguous finding, would be a better test of whether stronger
+models change the OUTCOME rather than just the write-up.
+
+**VERDICT for the matrix**: worked -- all four runs succeeded, reproducibly
+found the same real vulnerability, and the comparison surfaced a real, useful
+follow-on question (report sophistication vs. model tier) plus one concrete
+unfixed inefficiency (budget spent post-confirmation with nothing left to find).
