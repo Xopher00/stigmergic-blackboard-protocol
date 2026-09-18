@@ -90,10 +90,6 @@ class DecayProfile:
         )
 
 
-def dir_of(path: str) -> str:
-    return path.rsplit("/", 1)[0] if "/" in path else ""
-
-
 def read_board_snapshot(bb: LocalBlackboard, profile: DecayProfile) -> BoardSnapshot:
     """Direct-from-blackboard view used by the run supervisor and by tests; scouts get
     the same information through the suggest_files tool built on top of this."""

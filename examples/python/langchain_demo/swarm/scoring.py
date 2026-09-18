@@ -36,24 +36,6 @@ def score_file(path: str, board: BoardSnapshot) -> float:
     return heat - recency_penalty
 
 
-def choose_next_file(
-    candidates: list[str],
-    board: BoardSnapshot,
-    rng: random.Random,
-    epsilon: float = 0.15,
-) -> str | None:
-    """One scout's next-file decision. Ties are broken via rng, not sort order, to
-    avoid a lexical bias toward early-alphabet files."""
-    unclaimed = [c for c in candidates if c not in board.claimed]
-    if not unclaimed:
-        return None
-    if rng.random() < epsilon:
-        return rng.choice(unclaimed)
-    scored = [(score_file(c, board), c) for c in unclaimed]
-    best = max(s for s, _ in scored)
-    return rng.choice([c for s, c in scored if s == best])
-
-
 def suggest_next_files(
     candidates: list[str],
     board: BoardSnapshot,
@@ -62,13 +44,24 @@ def suggest_next_files(
     k: int = 3,
 ) -> list[str]:
     """A shortlist for the scout's tool call. This is sensing, not assignment -- the
-    scout still chooses which (if any) of these to read."""
+    scout still chooses which (if any) of these to read. Candidates are shuffled
+    before ranking so equal scores break randomly rather than alphabetically."""
     unclaimed = [c for c in candidates if c not in board.claimed]
     if not unclaimed:
         return []
+    rng.shuffle(unclaimed)
     if rng.random() < epsilon:
-        shuffled = list(unclaimed)
-        rng.shuffle(shuffled)
-        return shuffled[:k]
-    ranked = sorted(unclaimed, key=lambda c: score_file(c, board), reverse=True)
-    return ranked[:k]
+        return unclaimed[:k]
+    return sorted(unclaimed, key=lambda c: score_file(c, board), reverse=True)[:k]
+
+
+def choose_next_file(
+    candidates: list[str],
+    board: BoardSnapshot,
+    rng: random.Random,
+    epsilon: float = 0.15,
+) -> str | None:
+    """One scout's next-file decision -- the top of the same shortlist, so there is
+    only one scoring/exploration implementation to keep honest."""
+    picks = suggest_next_files(candidates, board, rng, epsilon=epsilon, k=1)
+    return picks[0] if picks else None

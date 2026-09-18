@@ -17,7 +17,7 @@ import sbp.blackboard as blackboard_module
 from sbp.agent import SbpAgent
 from sbp.blackboard import LocalBlackboard, get_shared_blackboard
 from sbp.client import AsyncSbpClient
-from sbp.types import EmitParams, TriggerPayload
+from sbp.types import EmitParams
 
 from swarm import roles
 from swarm.attention import run_attention_sampler
@@ -26,6 +26,11 @@ from swarm.budget import Budget, make_budget_middleware
 from swarm.corpus import Corpus, load_corpus
 from swarm.report import write_run_summary
 from swarm.scripted import bloodhound_model, judge_model, scout_model, write_scripted_corpus
+
+
+# "Nothing hot" is trivially true before anything is promoted, so the settled
+# condition can fire while bloodhound is still mid-confirmation (see EXPERIMENTS.md).
+FINAL_REPORT_GRACE_S = 15.0
 
 
 def _all_files_covered(bb, corpus: Corpus) -> bool:
@@ -46,14 +51,14 @@ async def _revive_stalled_scouts(
     bb = get_shared_blackboard()
     while True:
         await asyncio.sleep(interval_s)
-        if _all_files_covered(bb, corpus):
+        idle = [s for s in scouts if s.active_activations == 0]
+        if not idle or _all_files_covered(bb, corpus):
             continue
-        for s in scouts:
-            if s.active_activations == 0:
-                await bb.evaluate_scents()
-                wake = roles.board.wake_trail(s.agent_id)
-                bb.emit(EmitParams(trail=wake, type=roles.board.TYPE_WAKE, intensity=1.0,
-                                    decay=profile.wake, source_agent="revive-supervisor"))
+        for s in idle:
+            await bb.evaluate_scents()
+            wake = roles.board.wake_trail(s.agent_id)
+            bb.emit(EmitParams(trail=wake, type=roles.board.TYPE_WAKE, intensity=1.0,
+                                decay=profile.wake, source_agent="revive-supervisor"))
 
 
 async def _run_swarm(
@@ -76,6 +81,8 @@ async def _run_swarm(
     for w in all_workers:
         await w.sbp_agent.start()
     await observer.start()
+    if enable_revive:
+        await roles.register_bloodhound_self_watch(bloodhound_worker)
 
     worker_tasks = [asyncio.create_task(w.run()) for w in all_workers]
     observer_task = asyncio.create_task(observer.run())
@@ -97,13 +104,10 @@ async def _run_swarm(
                                   decay=profile.wake, payload={})
         try:
             await asyncio.wait_for(done.wait(), timeout=timeout_s)
-            # Give bloodhound one more self-watch window, then re-invoke the judge
-            # directly (write_report overwrites) so its report isn't stale.
-            await asyncio.sleep(15)
-            await judge_worker._on_trigger(TriggerPayload(
-                scent_id="supervisor:final-report", triggered_at=0,
-                condition_snapshot={}, context_pheromones=[], activation_payload={},
-            ))
+            # Give bloodhound one more self-watch window, then re-run the judge
+            # (write_report overwrites) so its report isn't stale.
+            await asyncio.sleep(FINAL_REPORT_GRACE_S)
+            await judge_worker.force_trigger("supervisor:final-report")
         except asyncio.TimeoutError:
             ended_by = "timeout"
         if budget.tripped and not done.is_set():
@@ -131,18 +135,21 @@ async def _run_swarm(
     }
 
 
+def _setup(out_dir: Path, seed: int, profile: DecayProfile, budget_tokens: int):
+    """Installs the journaling blackboard singleton (must happen before any client
+    connects) and returns the per-run state every mode needs."""
+    blackboard_module._shared_blackboard = LocalBlackboard(journal_path=str(out_dir / "journal.jsonl"))
+    budget = Budget(limit_tokens=budget_tokens)
+    return random.Random(seed), budget, [make_budget_middleware(budget, profile)]
+
+
 async def run_scripted(out_dir: Path, seed: int = 0, timeout_s: float = 30.0) -> dict:
     corpus_root = out_dir / "scripted_corpus"
     write_scripted_corpus(corpus_root)
     corpus = load_corpus(corpus_root)
 
-    journal_path = out_dir / "journal.jsonl"
-    blackboard_module._shared_blackboard = LocalBlackboard(journal_path=str(journal_path))
-
     profile = DecayProfile.scripted()
-    rng = random.Random(seed)
-    budget = Budget(limit_tokens=10**9)
-    middleware = [make_budget_middleware(budget, profile)]
+    rng, budget, middleware = _setup(out_dir, seed, profile, budget_tokens=10**9)
 
     scouts = [
         roles.build_scout("scout-1", scout_model([
@@ -196,13 +203,8 @@ async def run_live(
     if not corpus.files:
         raise SystemExit(f"no files found for apk={apk!r} source={source!r}")
 
-    journal_path = out_dir / "journal.jsonl"
-    blackboard_module._shared_blackboard = LocalBlackboard(journal_path=str(journal_path))
-
     profile = DecayProfile.live()
-    rng = random.Random(seed)
-    budget = Budget(limit_tokens=budget_tokens)
-    middleware = [make_budget_middleware(budget, profile)]
+    rng, budget, middleware = _setup(out_dir, seed, profile, budget_tokens)
 
     scouts = [
         roles.build_scout(f"scout-{i+1}", _openrouter_model(slug), corpus, profile, rng,

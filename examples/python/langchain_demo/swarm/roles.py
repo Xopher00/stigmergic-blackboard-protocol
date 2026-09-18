@@ -21,7 +21,11 @@ from sbp.blackboard import get_shared_blackboard
 from sbp.conditions import and_, count_gte, max_gte, not_, or_, threshold
 from sbp.types import CompositeCondition, EmitParams, SniffParams
 
-from sbp_worker import SbpWorker
+from sbp_worker import DEFAULT_COOLDOWN_MS, SbpWorker
+
+# A wake reinforcement landing inside the scent's cooldown is never seen as a rising
+# edge, so the self-wake loop has to clear that window before re-arming.
+REARM_DELAY_S = DEFAULT_COOLDOWN_MS / 1000 + 0.05
 from swarm import board
 from swarm.board import DecayProfile
 from swarm.corpus import Corpus
@@ -36,8 +40,15 @@ EVIDENCE_KINDS = (
 )
 
 
+WRITABLE_TRAILS = frozenset(board.SCOUT_TRAILS) | frozenset(board.BLOODHOUND_TRAILS)
+
+
 def _emit(trail: str, type_: str, intensity: float, decay, payload: dict, source: str,
           merge_strategy: str = "reinforce") -> str:
+    # These tools bypass SbpWorker's allowed_trails gate to set a per-trail decay,
+    # so the writable set is asserted here instead of silently widening.
+    if trail not in WRITABLE_TRAILS and not trail.startswith("swarm.wake."):
+        raise ValueError(f"refusing to emit outside the swarm's writable trails: {trail}")
     result = get_shared_blackboard().emit(EmitParams(
         trail=trail, type=type_, intensity=intensity, decay=decay, payload=payload,
         merge_strategy=merge_strategy, source_agent=source,
@@ -182,9 +193,7 @@ def _scout_tools(
         """Re-affirm that you are still active and reacting -- call this once at the
         end of every activation, after you finish with the current file (or decide
         there is nothing left to do), so you get woken again for the next one."""
-        # Reinforcing before on_scent's fixed 1000ms cooldown clears would land in
-        # its dead window and never register as a rising edge -- so wait it out.
-        await asyncio.sleep(1.05)
+        await asyncio.sleep(REARM_DELAY_S)
         return _emit(board.wake_trail(scout_id), board.TYPE_WAKE, 1.0, profile.wake, {}, scout_id)
 
     return [*_reader_tools(corpus), suggest_files, claim_file, mark_visited, mark_covered,
@@ -263,20 +272,20 @@ def _bloodhound_tools(corpus: Corpus, profile: DecayProfile) -> list:
 
     @tool
     async def keep_watching() -> str:
-        """Call this once, last, at the end of every activation, right after
-        sbp_register_scent. Reinforces the wake signal your self-watch scent
-        listens for."""
-        await asyncio.sleep(1.05)
+        """Call this once, last, at the end of every activation. Reinforces the wake
+        signal your self-watch scent listens for, so you get another look at the
+        evidence trail even when nothing new arrives on its own."""
+        await asyncio.sleep(REARM_DELAY_S)
         return _emit(board.wake_trail(BLOODHOUND_ID), board.TYPE_WAKE, 1.0, profile.wake, {}, BLOODHOUND_ID)
 
     return [*_reader_tools(corpus), mark_hot, ask_question, keep_watching]
 
 
-BLOODHOUND_SBP_OPS = ("sniff", "inscribe", "read", "register_scent")
+BLOODHOUND_SBP_OPS = ("sniff", "inscribe", "read")
 BLOODHOUND_SELF_WATCH_ID = "watch-self"
 BLOODHOUND_SYSTEM_PROMPT = """You are the bloodhound. You wake whenever a scout \
-reports evidence. Read the reported code yourself before deciding anything -- \
-never promote a finding you have not read.
+reports evidence, and periodically after that. Read the reported code yourself \
+before deciding anything -- never promote a finding you have not read.
 
 sbp_sniff(trails=['{evidence}']) to see all current evidence, grouped by its 'kind'. \
 Mark an area hot with mark_hot ONLY when the same kind of evidence appears in two or \
@@ -287,19 +296,13 @@ file yourself, then sbp_inscribe(trail='{dossier}', key=<dir>, value={{'files': 
 [...], 'kind': kind, 'summary': ...}}) and mark_hot(dir, kind, intensity). You may \
 ask_question to point scouts at something specific worth checking.
 
-The evidence trail only wakes you on its first rising edge -- once anything is on \
-it, later independent confirmations would not wake you again on their own. So at \
-the END of every activation, ALWAYS call sbp_register_scent(scent_id='{self_watch}', \
-trail='{wake}', signal_type='wake', value=0.5, cooldown_ms=0) (harmless to repeat, \
-it just refreshes the watch) followed by keep_watching -- that is what keeps you \
-checking back even when no new evidence has arrived on its own."""
+Always end your turn with EXACTLY ONE call to keep_watching, whether or not you \
+found anything new -- that is what keeps you checking back."""
 
 
 def build_bloodhound(model: BaseChatModel, corpus: Corpus, profile: DecayProfile, middleware=()) -> SbpWorker:
     wake = board.wake_trail(BLOODHOUND_ID)
-    prompt = BLOODHOUND_SYSTEM_PROMPT.format(evidence=board.TRAIL_EVIDENCE, dossier=board.TRAIL_DOSSIER,
-                                              self_watch=BLOODHOUND_SELF_WATCH_ID, wake=wake)
-    # Registered self-watch scent re-triggers afterward, with its own edge tracking.
+    prompt = BLOODHOUND_SYSTEM_PROMPT.format(evidence=board.TRAIL_EVIDENCE, dossier=board.TRAIL_DOSSIER)
     condition = and_(threshold(board.TRAIL_EVIDENCE, "*", ">=", 0.5), _not_halted())
     return SbpWorker(
         BLOODHOUND_ID, model, prompt,
@@ -309,6 +312,16 @@ def build_bloodhound(model: BaseChatModel, corpus: Corpus, profile: DecayProfile
         allowed_trails=[*board.BLOODHOUND_TRAILS, wake],
         middleware=middleware,
         recursion_limit=45,
+    )
+
+
+async def register_bloodhound_self_watch(worker: SbpWorker) -> None:
+    """Registered here rather than asked of the model each turn: prompt-compliance
+    for a structural requirement is exactly what failed for the scouts' claim gate.
+    A separate scent id keeps its own edge state, unmasked by the evidence scent."""
+    await worker.watch(
+        BLOODHOUND_SELF_WATCH_ID,
+        threshold(board.wake_trail(BLOODHOUND_ID), board.TYPE_WAKE, ">=", 0.5),
     )
 
 

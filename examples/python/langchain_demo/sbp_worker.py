@@ -43,6 +43,10 @@ ALL_SBP_OPS = (
 # something every worker needs.
 DEFAULT_SBP_OPS = ("emit", "sniff", "inscribe", "read")
 
+# Passed explicitly rather than inheriting SbpAgent's default, so callers that pace
+# a self-wake loop can reference the same number instead of guessing at it.
+DEFAULT_COOLDOWN_MS = 1000
+
 
 def _trim_history(messages: list[BaseMessage], max_tokens: int) -> list[BaseMessage] | None:
     # Ported from mobiletesting/change_pipeline/worker.py:172-176 — same recipe, not reinvented.
@@ -113,6 +117,7 @@ class SbpWorker:
         trim_max_tokens: int = 12000,
         middleware: Sequence[AgentMiddleware] = (),
         recursion_limit: int = 10,
+        cooldown_ms: int = DEFAULT_COOLDOWN_MS,
     ) -> None:
         self.agent_id = agent_id
         self.sbp_agent = SbpAgent(agent_id=agent_id, local=local, default_decay=default_decay)
@@ -129,10 +134,27 @@ class SbpWorker:
         )
         self._invoke_config = {"configurable": {"thread_id": agent_id}, "recursion_limit": recursion_limit}
 
+        self.cooldown_ms = cooldown_ms
         if isinstance(listens_for, dict):
-            self.sbp_agent.when(**listens_for)(self._on_trigger)
+            self.sbp_agent.when(**{"cooldown_ms": cooldown_ms, **listens_for})(self._on_trigger)
         else:
-            self.sbp_agent.on_scent(f"{agent_id}:trigger", listens_for)(self._on_trigger)
+            self.sbp_agent.on_scent(f"{agent_id}:trigger", listens_for,
+                                     cooldown_ms=cooldown_ms)(self._on_trigger)
+
+    async def force_trigger(self, scent_id: str) -> None:
+        """Run one activation directly, outside the scent loop. For a supervisor that
+        needs a final pass after the board has already settled."""
+        await self._on_trigger(TriggerPayload(
+            scent_id=scent_id, triggered_at=0, condition_snapshot={},
+            context_pheromones=[], activation_payload={},
+        ))
+
+    async def watch(self, scent_id: str, condition: ScentCondition, cooldown_ms: int = 0) -> None:
+        """Register an additional scent, routed to this worker's own handler. A
+        separately registered scent tracks its own edges, so it isn't masked by a
+        condition that stays true on the construction-time scent."""
+        await self.sbp_agent.register_scent(scent_id, condition, cooldown_ms=cooldown_ms)
+        await self.sbp_agent.subscribe(scent_id, self._on_trigger)
 
     def _denied(self, trail: str | None) -> str | None:
         if self._allowed_trails is not None and trail not in self._allowed_trails:

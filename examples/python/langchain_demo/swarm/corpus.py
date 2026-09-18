@@ -5,8 +5,16 @@ files are read-only evidence").
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+
+
+@lru_cache(maxsize=512)
+def _read_lines_cached(full_path: str) -> tuple[str, ...]:
+    # Safe to cache: the corpus is immutable for the duration of a run.
+    return tuple(Path(full_path).read_text(errors="replace").splitlines())
 
 
 @dataclass(frozen=True)
@@ -14,20 +22,22 @@ class Corpus:
     root: Path
     files: tuple[str, ...]  # relative POSIX paths, sorted, stable order
 
-    def read(self, path: str) -> str:
+    def _lines(self, path: str) -> tuple[str, ...]:
         if path not in self.files:
             raise ValueError(f"not in corpus: {path}")
-        return (self.root / path).read_text(errors="replace")
+        return _read_lines_cached(str(self.root / path))
+
+    def read(self, path: str) -> str:
+        return "\n".join(self._lines(path))
 
     def read_lines(self, path: str, start: int, end: int) -> str:
-        lines = self.read(path).splitlines()
+        lines = self._lines(path)
         start = max(1, start)
         end = min(len(lines), end)
         return "\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1))
 
     def grep(self, path: str, pattern: str, context: int = 1) -> str:
-        import re
-        lines = self.read(path).splitlines()
+        lines = self._lines(path)
         rx = re.compile(pattern)
         hits = [i for i, line in enumerate(lines) if rx.search(line)]
         if not hits:

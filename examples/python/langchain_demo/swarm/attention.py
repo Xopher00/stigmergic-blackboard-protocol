@@ -23,10 +23,11 @@ async def run_attention_sampler(bb: LocalBlackboard, interval_s: float, stop: as
         except asyncio.TimeoutError:
             pass
         hot = bb.sniff(SniffParams(trails=[TRAIL_HOT]))
+        # Only areas that moved this tick: a cold area's integral is unchanged, and
+        # re-inscribing every area ever seen costs a trace write per area per tick.
         for p in hot.pheromones:
             ledger[p.type] = ledger.get(p.type, 0.0) + p.current_intensity * interval_s
-        for area, integral in ledger.items():
             bb.inscribe(InscribeParams(
-                trail=TRAIL_LEDGER, key=area, value={"integral": integral},
+                trail=TRAIL_LEDGER, key=p.type, value={"integral": ledger[p.type]},
                 source_agent="attention-sampler",
             ))

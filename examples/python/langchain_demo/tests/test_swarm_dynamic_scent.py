@@ -70,3 +70,30 @@ async def test_scout_self_registers_a_scent_gets_woken_by_it_and_cleans_up_on_st
 
     assert "scout-1:watch-topic" not in bb.scents
     assert "scout-1:watch-topic" not in bb.handlers
+
+
+@pytest.mark.asyncio
+async def test_bloodhound_self_watch_is_registered_in_code_not_by_the_model(tmp_path):
+    """The self-watch is structural: it must exist without the model having called
+    any tool, since prompt compliance is exactly what failed for the claim gate."""
+    blackboard_module._shared_blackboard = LocalBlackboard()
+    bb = get_shared_blackboard()
+
+    root = tmp_path / "corpus"
+    write_scripted_corpus(root)
+    corpus = load_corpus(root)
+    profile = DecayProfile.scripted()
+
+    # A model that never emits a single tool call.
+    bloodhound = roles.build_bloodhound(
+        ScriptedChatModel(responses=[AIMessage(content="idle")]), corpus, profile,
+    )
+    await bloodhound.sbp_agent.start()
+    try:
+        await roles.register_bloodhound_self_watch(bloodhound)
+        scent_id = f"{roles.BLOODHOUND_ID}:{roles.BLOODHOUND_SELF_WATCH_ID}"
+        assert scent_id in bb.scents
+        assert scent_id in bb.handlers
+    finally:
+        bloodhound.stop()
+        await bloodhound.sbp_agent.stop()
