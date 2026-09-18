@@ -40,8 +40,6 @@ htmlcov/
 # poetry.lock
 RELEASE_NOTES.md
 
-# Swarm experiment: downloaded binaries, decompiled corpus, run output
-examples/python/langchain_demo/swarm/.tools/
-examples/python/langchain_demo/swarm/corpus/
-examples/python/langchain_demo/swarm/corpus_amaze/
+# Swarm experiment: downloaded jadx/APKs, decompiled corpora, run output --
+# all self-contained under out/.work/ (see swarm/decompile.py)
 examples/python/langchain_demo/swarm/out/

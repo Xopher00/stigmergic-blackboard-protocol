@@ -2,7 +2,7 @@
 
 Scripted mode (default): zero API cost, deterministic ScriptedChatModel fleet, a tiny
 fixed corpus. Must pass before live mode is allowed. Live mode: real OpenRouter models
-against a real decompiled corpus (see setup_corpus.py).
+against a real decompiled corpus -- point --apk at any .apk (see swarm/decompile.py).
 """
 from __future__ import annotations
 
@@ -176,15 +176,25 @@ def _openrouter_model(model_slug: str):
 
 
 async def run_live(
-    source: Path, out_dir: Path, seed: int, timeout_s: float, budget_tokens: int,
+    out_dir: Path, seed: int, timeout_s: float, budget_tokens: int,
     scout_models: list[str], bloodhound_model_slug: str, judge_model_slug: str,
+    apk: str | None = None, source: Path | None = None,
 ) -> dict:
+    """Exactly one of apk (a path or http(s) URL to an .apk -- decompiled and its
+    own package auto-discovered from its manifest, no hand-picked path) or source
+    (an already-known corpus directory, e.g. from a prior --apk run) is required."""
     from dotenv import load_dotenv
     load_dotenv()
 
-    corpus = load_corpus(source, exclude=("R.java", "BuildConfig.java"))
+    if apk:
+        from swarm.decompile import prepare_corpus
+        corpus = prepare_corpus(apk, out_dir.parent / ".work")
+    elif source:
+        corpus = load_corpus(source, exclude=("R.java", "BuildConfig.java"))
+    else:
+        raise SystemExit("run_live needs either apk= or source=")
     if not corpus.files:
-        raise SystemExit(f"no files found under {source} -- run setup_corpus.py first")
+        raise SystemExit(f"no files found for apk={apk!r} source={source!r}")
 
     journal_path = out_dir / "journal.jsonl"
     blackboard_module._shared_blackboard = LocalBlackboard(journal_path=str(journal_path))
@@ -209,7 +219,7 @@ async def run_live(
                                 budget, out_dir, timeout_s)
     summary["report_path"] = str(report_path)
     summary["mode"] = "live"
-    summary["source"] = str(source)
+    summary["source"] = str(corpus.root)
     write_run_summary(out_dir / "run_summary.json", **summary)
     return summary
 
@@ -217,7 +227,10 @@ async def run_live(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Foraging swarm experiment")
     parser.add_argument("--mode", choices=["scripted", "live"], default="scripted")
-    parser.add_argument("--source", default="swarm/corpus/sources/com/android/insecurebankv2")
+    parser.add_argument("--apk", default=None, help="path or http(s) URL to an .apk -- "
+                         "decompiled and its own package auto-discovered from its manifest")
+    parser.add_argument("--source", default=None,
+                         help="an already-decompiled corpus directory, as an alternative to --apk")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout-s", type=float, default=None)
     parser.add_argument("--budget-tokens", type=int, default=3_000_000)
@@ -242,11 +255,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"scripted preflight did not finish cleanly ({scripted_summary}); refusing live run")
             return 1
 
+    if not args.apk and not args.source:
+        print("--mode live needs either --apk <path-or-url> or --source <corpus-dir>")
+        return 1
+
     default_model = os.environ.get("OPENROUTER_MODEL", "z-ai/glm-5.3-flash")
     scout_models = args.scout_models or [default_model, default_model]
     summary = asyncio.run(run_live(
-        Path(args.source), out_dir, args.seed, args.timeout_s or 600.0, args.budget_tokens,
+        out_dir, args.seed, args.timeout_s or 600.0, args.budget_tokens,
         scout_models, args.bloodhound_model or default_model, args.judge_model or default_model,
+        apk=args.apk, source=Path(args.source) if args.source else None,
     ))
     print(f"live run: {summary}")
     return 0
